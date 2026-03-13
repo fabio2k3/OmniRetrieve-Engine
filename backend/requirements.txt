@@ -1,2 +1,5 @@
 # SSL certificate verification (needed on Windows)
 certifi>=2024.0.0
+pymupdf>=1.24.0
+# sentence-transformers>=2.7.0
+# chromadb>=0.5.0

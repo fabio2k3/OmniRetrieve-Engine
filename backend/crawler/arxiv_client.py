@@ -1,4 +1,3 @@
-
 """
 arxiv_client.py
 Thin wrapper around the arXiv Atom API.
@@ -18,6 +17,7 @@ from datetime import datetime
 from typing import List, Optional, Tuple
 
 from .document import Document
+from .robots import checker as _robots
 
 # ---------------------------------------------------------------------------
 # SSL context — tries to use certifi if installed, otherwise falls back to
@@ -97,9 +97,16 @@ class ArxivClient:
     # Rate-limited HTTP helper
     # -----------------------------------------------------------------------
     def _get(self, url: str) -> str:
+        # ── robots.txt compliance ────────────────────────────────────────────
+        if not _robots.allowed(url):
+            raise PermissionError(f"robots.txt disallows fetching: {url}")
+
+        # ── Rate limiting: respect robots.txt Crawl-delay + our own minimum ─
+        robots_delay = _robots.crawl_delay(url)
+        effective_delay = max(self.request_delay, robots_delay)
         elapsed = time.monotonic() - self._last_request_time
-        if elapsed < self.request_delay:
-            time.sleep(self.request_delay - elapsed)
+        if elapsed < effective_delay:
+            time.sleep(effective_delay - elapsed)
 
         logger.debug("GET %s", url)
         req = urllib.request.Request(url, headers={"User-Agent": "SRI-Crawler/1.0"})
