@@ -29,12 +29,7 @@ class TextPreprocessor:
     _LATEX_RE    = re.compile(r"\$[^$]*\$|\\\w+\{[^}]*\}")
     _DIGIT_RE    = re.compile(r"\b\d+\b")
 
-    def __init__(
-        self,
-        use_stemming: bool = False,
-        min_token_len: int = 3,
-        language: str = "english",
-    ) -> None:
+    def __init__(self, use_stemming: bool = False, min_token_len: int = 3, language: str = "english",) -> None:
         self.use_stemming  = use_stemming and _HAS_NLTK
         self.min_token_len = min_token_len
 
@@ -47,7 +42,28 @@ class TextPreprocessor:
             self._stopwords = _BASIC_STOPWORDS
             self._stemmer   = None
 
+
     def process(self, text: str) -> list[str]:
+        """
+        Procesa y normaliza un texto crudo y devuelve la lista de tokens resultante.
+
+        Pasos principales:
+            1. Si el texto es vacío/nulo, devuelve lista vacía.
+            2. Pasa el texto a minúsculas.
+            3. Elimina URLs, expresiones LaTeX y números aislados.
+            4. Elimina puntuación usando una tabla de traducción (_PUNCT_TABLE).
+            5. Tokeniza por espacios (text.split()).
+            6. Filtra tokens por longitud mínima (self.min_token_len).
+            7. Filtra stopwords (self._stopwords).
+            8. Conserva solo tokens alfabéticos (isalpha()).
+            9. Aplica stemming si está configurado y disponible.
+
+        Parámetros:
+            text (str): texto crudo a preprocesar.
+
+        Retorna:
+            list[str]: lista de tokens normalizados listos para indexación.
+        """
         if not text:
             return []
 
@@ -67,7 +83,19 @@ class TextPreprocessor:
 
         return tokens
 
+
 def _ensure_nltk_data() -> None:
+    """
+    Verifica y descarga (si es necesario) recursos básicos de NLTK requeridos.
+
+    Recursos verificados:
+        - 'stopwords'  -> path 'corpora/stopwords'
+        - 'punkt_tab'  -> path 'tokenizers/punkt_tab' (nombre usado en este proyecto)
+
+    Comportamiento:
+        - Para cada recurso intenta localizarlo con nltk.data.find().
+        - Si falta, registra un mensaje informativo y descarga el recurso con nltk.download(..., quiet=True).
+    """
     for resource, path in [
         ("stopwords",  "corpora/stopwords"),
         ("punkt_tab",  "tokenizers/punkt_tab"),

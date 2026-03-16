@@ -28,14 +28,7 @@ log = logging.getLogger(__name__)
 
 
 class IndexingPipeline:
-    def __init__(
-        self,
-        db_path: Path = DB_PATH,
-        field: str = "both",
-        batch_size: int = 100,
-        use_stemming: bool = False,
-        min_token_len: int = 3,
-    ) -> None:
+    def __init__(self, db_path: Path = DB_PATH, field: str = "both", batch_size: int = 100, use_stemming: bool = False, min_token_len: int = 3,) -> None:
         self.preprocessor = TextPreprocessor(
             use_stemming=use_stemming,
             min_token_len=min_token_len,
@@ -48,6 +41,25 @@ class IndexingPipeline:
         )
 
     def run(self, reindex: bool = False, recalculate_idf: bool = True) -> dict:
+        """
+        Ejecuta el proceso de indexación completo.
+
+        Parámetros:
+            reindex (bool): si True borra el índice existente y reconstruye desde cero.
+            recalculate_idf (bool): si True recalcula los valores IDF al finalizar
+                                   (solo si se procesaron documentos).
+
+        Retorna:
+            dict: estadísticas devueltas por self.indexer.build() que describen
+                  el trabajo realizado (por ejemplo 'docs_processed', etc.).
+
+        Comportamiento:
+            - Inicializa el esquema de la base de datos (indexer.init_schema()).
+            - Construye el índice (indexer.build()).
+            - Si recalculate_idf es True y se procesaron documentos, llama a
+              indexer.recalculate_idf().
+            - Emite logs informativos sobre el proceso.
+        """
         log.info("=" * 60)
         log.info("OmniRetrieve — Módulo de Indexación TF-IDF")
         log.info("=" * 60)
@@ -70,6 +82,19 @@ class IndexingPipeline:
         return stats
 
 def _parse_args() -> argparse.Namespace:
+    """
+    Construye y parsea los argumentos de la línea de comandos.
+
+    Retorna:
+        argparse.Namespace con los valores de los argumentos:
+            --db: Path a la base de datos.
+            --field: campo a indexar ('full_text', 'abstract', 'both').
+            --batch-size: tamaño de lote (N).
+            --reindex: flag para reindexar desde cero.
+            --stemming: flag para aplicar stemming.
+            --min-len: longitud mínima de token.
+            --no-recalc-idf: flag para omitir el recálculo de IDF al final.
+    """
     parser = argparse.ArgumentParser(
         description="OmniRetrieve — Módulo de Indexación TF-IDF",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -106,6 +131,16 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """
+    Punto de entrada de la CLI: valida argumentos y lanza la indexación.
+
+    Comportamiento:
+        - Llama a _parse_args() para obtener la configuración.
+        - Verifica que la base de datos exista; si no existe, registra un error y
+          finaliza con código de salida 1.
+        - Crea una instancia de IndexingPipeline con los parámetros recibidos y
+          ejecuta .run() con las opciones adecuadas (reindex y recalculate_idf).
+    """
     args = _parse_args()
 
     if not args.db.exists():

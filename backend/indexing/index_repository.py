@@ -22,11 +22,33 @@ class IndexRepository:
         self.db_path = Path(db_path)
 
     def _connect(self) -> sqlite3.Connection:
+        """
+        Crea y devuelve una conexión a la base de datos SQLite.
+
+        Configuraciones:
+            - check_same_thread=False para permitir uso desde hilos diferentes.
+            - row_factory=sqlite3.Row para acceder a columnas por nombre.
+
+        Retorna:
+            sqlite3.Connection listo para ejecutar consultas.
+        """
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
 
+
     def get_index_stats(self) -> dict[str, Any]:
+        """
+        Recupera estadísticas básicas del índice TF-IDF.
+
+        Retorna un diccionario con:
+            - vocab_size: tamaño del vocabulario (nº de términos).
+            - total_postings: número total de entradas en postings.
+            - total_docs: número de documentos distintos en postings.
+            - meta: diccionario con pares clave/valor desde la tabla index_meta.
+
+        Asegura el cierre de la conexión en el bloque finally.
+        """
         conn = self._connect()
         try:
             vocab_size     = conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0]
@@ -49,6 +71,18 @@ class IndexRepository:
 
 
     def get_document_vector(self, arxiv_id: str) -> dict[str, float]:
+        """
+        Obtiene el vector TF-IDF de un documento identificado por arxiv_id.
+
+        Parámetros:
+            - arxiv_id (str): identificador del documento.
+
+        Retorna:
+            - dict mapeando palabra -> peso tfidf (float).
+
+        Nota:
+            La consulta ordena por tfidf descendente; el dict resultante no mantiene orden.
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -65,7 +99,18 @@ class IndexRepository:
         finally:
             conn.close()
 
+
     def get_top_terms(self, arxiv_id: str, n: int = 20) -> list[dict]:
+        """
+        Devuelve los 'n' términos más importantes de un documento.
+
+        Parámetros:
+            - arxiv_id (str): id del documento.
+            - n (int): número máximo de términos a devolver (por defecto 20).
+
+        Retorna:
+            - lista de diccionarios con keys: 'word', 'tf', 'tfidf_weight'.
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -83,7 +128,17 @@ class IndexRepository:
         finally:
             conn.close()
 
+
     def get_postings_for_term(self, word: str) -> list[dict]:
+        """
+        Recupera todas las entradas (postings) asociadas a una palabra.
+
+        Parámetros:
+            - word (str): término a buscar en la tabla terms.
+
+        Retorna:
+            - lista de diccionarios con 'doc_id', 'tf' y 'tfidf_weight', ordenada por tfidf desc.
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -100,7 +155,17 @@ class IndexRepository:
         finally:
             conn.close()
 
+
     def get_term_df(self, word: str) -> int | None:
+        """
+        Devuelve la frecuencia de documento (df) para un término dado.
+
+        Parámetros:
+            - word (str): término cuyo df se consulta.
+
+        Retorna:
+            - int con el df si existe, o None si el término no está en la tabla.
+        """
         conn = self._connect()
         try:
             row = conn.execute(
@@ -110,9 +175,19 @@ class IndexRepository:
         finally:
             conn.close()
 
-    def get_tfidf_matrix(
-        self, max_docs: int | None = None
-    ) -> tuple[np.ndarray, list[str], list[int]]:
+
+    def get_tfidf_matrix(self, max_docs: int | None = None) -> tuple[np.ndarray, list[str], list[int]]:
+        """
+        Construye y devuelve la matriz TF-IDF completa (términos x documentos).
+
+        Parámetros:
+            - max_docs (int | None): si se proporciona, limita el número de documentos considerados.
+
+        Retorna una tupla:
+            - matrix: np.ndarray de forma (n_terms, n_docs) con dtype float32.
+            - doc_ids: lista de ids de documentos (orden de columnas).
+            - term_ids: lista de term_ids (orden de filas).
+        """
         conn = self._connect()
         try:
             sql_docs = "SELECT DISTINCT doc_id FROM postings ORDER BY doc_id"
@@ -143,7 +218,15 @@ class IndexRepository:
         finally:
             conn.close()
 
+
     def get_corpus_stats(self) -> dict[str, Any]:
+        """
+        Devuelve estadísticas agregadas del corpus filtrado por pdf_downloaded = 1.
+
+        Retorna un diccionario con:
+            - total_docs, avg_chars, min_chars, max_chars, total_chars
+            - top_categories: lista (hasta 10) de diccionarios {'categories', 'n'} ordenadas por frecuencia.
+        """
         conn = self._connect()
         try:
             corpus = dict(conn.execute("""
@@ -171,7 +254,23 @@ class IndexRepository:
         finally:
             conn.close()
 
+
     def search(self, query_tokens: list[str], top_k: int = 10) -> list[dict]:
+        """
+        Realiza una búsqueda simple por tokens: suma los pesos tfidf de los términos
+        en cada documento para calcular una puntuación (score) y devuelve los top_k documentos.
+
+        Parámetros:
+            - query_tokens: lista de tokens/ palabras a buscar.
+            - top_k: número máximo de resultados a devolver (por defecto 10).
+
+        Retorna:
+            - lista de diccionarios con 'doc_id', 'score' y 'title', ordenada por score descendente.
+
+        Comportamiento:
+            - Si query_tokens está vacío, devuelve lista vacía.
+            - Usa una consulta SQL que suma los tfidf_weight de los postings para los términos dados.
+        """
         if not query_tokens:
             return []
 
