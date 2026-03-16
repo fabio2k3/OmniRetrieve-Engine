@@ -24,7 +24,7 @@ logging.basicConfig(
     ],
 )
 
-from .crawler.crawler import Crawler, CrawlerConfig
+from crawler import Crawler, CrawlerConfig
 
 
 def parse_args():
