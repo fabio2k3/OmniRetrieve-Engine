@@ -143,6 +143,34 @@ class IndexRepository:
         finally:
             conn.close()
 
+    def get_corpus_stats(self) -> dict[str, Any]:
+        conn = self._connect()
+        try:
+            corpus = dict(conn.execute("""
+                SELECT
+                    COUNT(*)         AS total_docs,
+                    AVG(text_length) AS avg_chars,
+                    MIN(text_length) AS min_chars,
+                    MAX(text_length) AS max_chars,
+                    SUM(text_length) AS total_chars
+                FROM documents
+                WHERE pdf_downloaded = 1
+            """).fetchone())
+
+            categories = conn.execute("""
+                SELECT categories, COUNT(*) AS n
+                FROM documents
+                WHERE pdf_downloaded = 1
+                GROUP BY categories
+                ORDER BY n DESC
+                LIMIT 10
+            """).fetchall()
+
+            corpus["top_categories"] = [dict(r) for r in categories]
+            return corpus
+        finally:
+            conn.close()
+
     def search(self, query_tokens: list[str], top_k: int = 10) -> list[dict]:
         if not query_tokens:
             return []
