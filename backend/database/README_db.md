@@ -1,3 +1,9 @@
+---
+noteId: "4107f9f0221711f18224b359e9cd45df"
+tags: []
+
+---
+
 # OmniRetrieve — Estructura de la Base de Datos
 
 La base de datos SQLite en `backend/data/db/documents.db` es el punto de integración entre todos los módulos del sistema. El módulo de adquisición la escribe; los módulos de indexación y recuperación la leen y extienden.

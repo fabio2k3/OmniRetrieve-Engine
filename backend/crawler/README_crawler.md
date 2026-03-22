@@ -1,3 +1,9 @@
+---
+noteId: "41075db0221711f18224b359e9cd45df"
+tags: []
+
+---
+
 # OmniRetrieve — Módulo de Adquisición de Datos
 
 Crawler que descubre artículos de IA/ML en arXiv, descarga sus metadatos y extrae el texto completo, almacenándolo en SQLite para su posterior indexación.
