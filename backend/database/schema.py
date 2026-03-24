@@ -8,8 +8,14 @@ documents     — article metadata + extracted PDF text + indexing status
 chunks        — paragraph-level text fragments (embedding column reserved)
 crawl_log     — one row per crawler run, for monitoring
 terms         — [indexing] vocabulary: one row per unique token
-postings      — [indexing] inverted index: TF-IDF weight per (term, document)
+postings      — [indexing] inverted index: raw term frequencies per (term, document)
 index_meta    — [indexing] key/value store for indexing audit metadata
+
+Diseño del índice
+-----------------
+El indexador guarda ÚNICAMENTE frecuencias crudas (freq).
+El cálculo de pesos (BM25, TF-IDF, etc.) es responsabilidad
+del módulo recuperador, que puede aplicar el modelo que considere.
 """
 
 from __future__ import annotations
@@ -73,19 +79,20 @@ CREATE TABLE IF NOT EXISTS crawl_log (
     notes           TEXT
 );
 
--- ── Módulo de indexación (TF-IDF) ──────────────────────────────────────────
+-- ── Módulo de indexación (frecuencias crudas) ──────────────────────────────
+-- El indexador solo guarda frecuencias. Los pesos (BM25, TF-IDF, etc.)
+-- los calcula el módulo recuperador según el modelo que implemente.
 
 CREATE TABLE IF NOT EXISTS terms (
     term_id  INTEGER PRIMARY KEY AUTOINCREMENT,
     word     TEXT    NOT NULL UNIQUE,
-    df       INTEGER NOT NULL DEFAULT 0   -- document frequency
+    df       INTEGER NOT NULL DEFAULT 0   -- document frequency: en cuántos docs aparece
 );
 
 CREATE TABLE IF NOT EXISTS postings (
-    term_id      INTEGER NOT NULL REFERENCES terms(term_id)         ON DELETE CASCADE,
-    doc_id       TEXT    NOT NULL REFERENCES documents(arxiv_id)    ON DELETE CASCADE,
-    tf           REAL    NOT NULL DEFAULT 0,   -- TF suavizado: log(1 + freq)
-    tfidf_weight REAL    NOT NULL DEFAULT 0,   -- peso final TF-IDF
+    term_id  INTEGER NOT NULL REFERENCES terms(term_id)      ON DELETE CASCADE,
+    doc_id   TEXT    NOT NULL REFERENCES documents(arxiv_id) ON DELETE CASCADE,
+    freq     INTEGER NOT NULL DEFAULT 0,   -- frecuencia cruda del término en el doc
     PRIMARY KEY (term_id, doc_id)
 );
 
