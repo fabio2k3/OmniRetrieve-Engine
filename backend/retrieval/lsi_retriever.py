@@ -5,7 +5,6 @@ Fase online del modulo LSI.
 Proyecta la consulta al espacio latente y devuelve los K articulos
 mas relevantes por similitud coseno.
 
-Referencia: Manning et al. (2008), Cap. 18, sec. 18.3 "Queries in LSI"
 """
 from __future__ import annotations
 import logging
@@ -58,7 +57,7 @@ class LSIRetriever:
 
         t0 = time.monotonic()
 
-        # Opcion A garantizada: transform usa el vocabulario aprendido en build()
+        # transform usa el vocabulario aprendido en build()
         q_latent = self.model.pipeline.transform([query])  # (1, k)
         scores = cosine_similarity(q_latent, self.model.docs_latent).flatten()
         top_idx = np.argsort(scores)[::-1][:top_n]
