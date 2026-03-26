@@ -1,64 +1,69 @@
 """
 build_lsi.py
 ============
-Entrypoint del Modulo C (fase offline).
-Configura el logging, lee argumentos CLI, construye el modelo LSI
-y lo guarda en data/models/lsi_model.pkl.
+Entrypoint del módulo de recuperación (fase offline).
 
-Uso:
+Uso
+---
     python -m backend.retrieval.build_lsi
     python -m backend.retrieval.build_lsi --k 200
-    python -m backend.retrieval.build_lsi --k 100 --out custom.pkl
+    python -m backend.retrieval.build_lsi --k 150 --out data/models/custom.pkl
 """
+
+from __future__ import annotations
 import argparse
 import logging
 import sys
 from pathlib import Path
 
-# Configurar logging UNA VEZ en el entrypoint.
-# Los modulos (LSIModel, etc.) usan getLogger(__name__) y heredan esto.
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s -- %(message)s",
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.StreamHandler(sys.stdout),  # pantalla
-        logging.FileHandler(  # archivo
-            Path(__file__).resolve().parent.parent /
-            "data" / "lsi_build.log",
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            Path(__file__).resolve().parent.parent / "data" / "lsi_build.log",
             encoding="utf-8",
         ),
     ],
 )
-log = logging.getLogger(__name__)  # "retrieval.build_lsi"
+log = logging.getLogger(__name__)
 
+from backend.database.schema import DB_PATH
 from .lsi_model import LSIModel, MODEL_PATH
 
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="OmniRetrieve -- Construye el indice LSI",
+        description="OmniRetrieve — Construcción del índice LSI",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--k", type=int, default=100,
-                   help="Numero de conceptos latentes")
-    p.add_argument("--out", type=Path, default=MODEL_PATH,
-                   help="Ruta de salida del modelo .pkl")
+    p.add_argument("--k",        type=int,  default=100,    help="Dimensiones latentes (SVD)")
+    p.add_argument("--max-docs", type=int,  default=None,   help="Límite de documentos (debug)")
+    p.add_argument("--db",       type=Path, default=DB_PATH, help="Ruta a la base de datos")
+    p.add_argument("--out",      type=Path, default=MODEL_PATH, help="Ruta de salida del modelo .pkl")
     args = p.parse_args()
 
+    if not args.db.exists():
+        log.error("Base de datos no encontrada: %s", args.db)
+        sys.exit(1)
+
     log.info("=" * 55)
-    log.info("OmniRetrieve -- Construccion del indice LSI")
-    log.info("k=%d salida=%s", args.k, args.out)
+    log.info("OmniRetrieve — Construcción del índice LSI")
+    log.info("k=%d  db=%s  out=%s", args.k, args.db, args.out)
     log.info("=" * 55)
 
     model = LSIModel(k=args.k)
-    stats = model.build()
+    stats = model.build(db_path=args.db, max_docs=args.max_docs)
     model.save(path=args.out)
 
     log.info("-" * 55)
-    log.info("Completado: n_docs=%d k=%d varianza=%.2f%% tiempo=%.1fs",
-             stats["n_docs"], stats["k"],
-             stats["var_explained"] * 100, stats["elapsed_s"])
+    log.info(
+        "Completado: n_docs=%d  k=%d  varianza=%.2f%%  tiempo=%.1fs",
+        stats["n_docs"], stats["k"],
+        stats["var_explained"] * 100, stats["elapsed_s"],
+    )
     log.info("=" * 55)
 
 
