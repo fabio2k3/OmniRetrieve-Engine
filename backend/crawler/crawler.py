@@ -68,7 +68,7 @@ class Crawler:
 
         # Importación lazy para no forzar SQLite en tests que no lo usan
         from ..database.schema import init_db, DB_PATH
-        from ..database import repository as repo
+        from ..database import crawler_repository as repo
         init_db(DB_PATH)
         self._repo    = repo
         self._db_path = DB_PATH
@@ -156,32 +156,40 @@ class Crawler:
                 documents     = self.client.fetch_documents(pending)
                 saved = skipped = 0
 
-                for doc in documents:
-                    # 1. CSV
-                    if doc.arxiv_id not in already_saved:
-                        doc.save(cfg.documents_csv)
-                        already_saved.add(doc.arxiv_id)
-                        saved += 1
-                    else:
-                        skipped += 1
-
-                    # 2. SQLite — upsert siempre (idempotente)
-                    self._repo.upsert_document(
-                        arxiv_id   = doc.arxiv_id,
-                        title      = doc.title,
-                        authors    = doc.authors,
-                        abstract   = doc.abstract,
-                        categories = doc.categories,
-                        published  = doc.published,
-                        updated    = doc.updated,
-                        pdf_url    = doc.pdf_url,
-                        fetched_at = doc.fetched_at,
-                        db_path    = self._db_path,
+                if not documents:
+                    logger.warning(
+                        "[Downloader] fetch_documents devolvió 0 documentos "
+                        "para %d IDs — posible error de red. Reintentando en el "
+                        "próximo ciclo.", len(pending)
                     )
+                else:
+                    for doc in documents:
+                        # 1. CSV
+                        if doc.arxiv_id not in already_saved:
+                            doc.save(cfg.documents_csv)
+                            already_saved.add(doc.arxiv_id)
+                            saved += 1
+                        else:
+                            skipped += 1
 
-                self.id_store.mark_downloaded(pending)
-                logger.info("[Downloader] Guardados %d, omitidos %d duplicados. %s",
-                            saved, skipped, self.id_store)
+                        # 2. SQLite — upsert siempre (idempotente)
+                        self._repo.upsert_document(
+                            arxiv_id   = doc.arxiv_id,
+                            title      = doc.title,
+                            authors    = doc.authors,
+                            abstract   = doc.abstract,
+                            categories = doc.categories,
+                            published  = doc.published,
+                            updated    = doc.updated,
+                            pdf_url    = doc.pdf_url,
+                            fetched_at = doc.fetched_at,
+                            db_path    = self._db_path,
+                        )
+
+                    # Solo marcar como descargados si realmente se procesaron
+                    self.id_store.mark_downloaded(pending)
+                    logger.info("[Downloader] Guardados %d, omitidos %d duplicados. %s",
+                                saved, skipped, self.id_store)
             except Exception as exc:
                 logger.error("[Downloader] Error en batch: %s", exc, exc_info=True)
 
