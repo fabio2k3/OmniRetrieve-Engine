@@ -7,6 +7,15 @@ Tables
 documents     — article metadata + extracted PDF text + indexing status
 chunks        — paragraph-level text fragments (embedding column reserved)
 crawl_log     — one row per crawler run, for monitoring
+terms         — [indexing] vocabulary: one row per unique token
+postings      — [indexing] inverted index: raw term frequencies per (term, document)
+index_meta    — [indexing] key/value store for indexing audit metadata
+
+Diseño del índice
+-----------------
+El indexador guarda ÚNICAMENTE frecuencias crudas (freq).
+El cálculo de pesos (BM25, TF-IDF, etc.) es responsabilidad
+del módulo recuperador, que puede aplicar el modelo que considere.
 """
 
 from __future__ import annotations
@@ -26,6 +35,8 @@ DB_PATH  = DATA_DIR / "db" / "documents.db"
 _DDL = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+
+-- ── Módulo de adquisición (crawler) ────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS documents (
     arxiv_id        TEXT PRIMARY KEY,
@@ -68,6 +79,30 @@ CREATE TABLE IF NOT EXISTS crawl_log (
     notes           TEXT
 );
 
+-- ── Módulo de indexación (frecuencias crudas) ──────────────────────────────
+-- El indexador solo guarda frecuencias. Los pesos (BM25, TF-IDF, etc.)
+-- los calcula el módulo recuperador según el modelo que implemente.
+
+CREATE TABLE IF NOT EXISTS terms (
+    term_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    word     TEXT    NOT NULL UNIQUE,
+    df       INTEGER NOT NULL DEFAULT 0   -- document frequency: en cuántos docs aparece
+);
+
+CREATE TABLE IF NOT EXISTS postings (
+    term_id  INTEGER NOT NULL REFERENCES terms(term_id)      ON DELETE CASCADE,
+    doc_id   TEXT    NOT NULL REFERENCES documents(arxiv_id) ON DELETE CASCADE,
+    freq     INTEGER NOT NULL DEFAULT 0,   -- frecuencia cruda del término en el doc
+    PRIMARY KEY (term_id, doc_id)
+);
+
+CREATE TABLE IF NOT EXISTS index_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- ── Índices ────────────────────────────────────────────────────────────────
+
 CREATE TABLE IF NOT EXISTS lsi_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     built_at        TEXT    NOT NULL,
@@ -83,6 +118,9 @@ CREATE INDEX IF NOT EXISTS idx_doc_published    ON documents(published);
 CREATE INDEX IF NOT EXISTS idx_doc_pdf_status   ON documents(pdf_downloaded);
 CREATE INDEX IF NOT EXISTS idx_chunks_arxiv     ON chunks(arxiv_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded  ON chunks(embedded_at);
+CREATE INDEX IF NOT EXISTS idx_postings_doc     ON postings(doc_id);
+CREATE INDEX IF NOT EXISTS idx_postings_term    ON postings(term_id);
+CREATE INDEX IF NOT EXISTS idx_terms_word       ON terms(word);
 """
 
 
