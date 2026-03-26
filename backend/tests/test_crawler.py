@@ -176,7 +176,7 @@ def test_arxiv_client(network: bool):
 def test_database(tmp: Path):
     section("5 · SQLite — schema y CRUD completo")
     from backend.database.schema import init_db
-    from backend.database import repository as repo
+    from backend.database import crawler_repository as repo
     db = tmp / "db" / "test.db"
 
     try:
@@ -288,7 +288,7 @@ def test_pdf_extractor(network: bool):
 def test_database_content(tmp: Path):
     section("5b · SQLite — verificación de contenido guardado")
     from backend.database.schema import init_db, get_connection
-    from backend.database import repository as repo
+    from backend.database import crawler_repository as repo
     db = tmp / "db" / "content.db"
     init_db(db)
 
@@ -377,7 +377,7 @@ def test_integration(tmp: Path, network: bool):
     section("7 · Integración — flujo completo crawler → SQLite")
     from backend.crawler.document import Document
     from backend.database.schema import init_db
-    from backend.database import repository as repo
+    from backend.database import crawler_repository as repo
 
     csv  = tmp / "int_docs.csv"
     db   = tmp / "db" / "int.db"
