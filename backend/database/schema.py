@@ -103,6 +103,16 @@ CREATE TABLE IF NOT EXISTS index_meta (
 
 -- ── Índices ────────────────────────────────────────────────────────────────
 
+CREATE TABLE IF NOT EXISTS lsi_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    built_at        TEXT    NOT NULL,
+    k               INTEGER NOT NULL,
+    n_docs          INTEGER NOT NULL,
+    var_explained   REAL,
+    model_path      TEXT,
+    notes           TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_doc_categories   ON documents(categories);
 CREATE INDEX IF NOT EXISTS idx_doc_published    ON documents(published);
 CREATE INDEX IF NOT EXISTS idx_doc_pdf_status   ON documents(pdf_downloaded);
