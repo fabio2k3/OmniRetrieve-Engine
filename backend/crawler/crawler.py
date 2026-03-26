@@ -118,19 +118,26 @@ class Crawler:
                     added = self.id_store.add_ids(ids)
                     logger.info("[Discovery] %d IDs encontrados → %d nuevos. %s",
                                 len(ids), added, self.id_store)
+                    # Siempre avanzar el offset, tanto si encontramos IDs
+                    # nuevos como si la página ya era conocida. Resetear
+                    # a 0 aquí significaría re-escanear páginas que ya
+                    # tenemos en lugar de continuar explorando el índice.
+                    cfg.discovery_start += cfg.ids_per_discovery
                     if added == 0:
-                        # Toda la página ya era conocida → hemos llegado al
-                        # límite de lo que ya teníamos. Reseteamos a 0 para
-                        # empezar a buscar papers recién publicados.
                         logger.info(
-                            "[Discovery] Página sin IDs nuevos — reseteando "
-                            "offset a 0 para buscar papers recientes."
+                            "[Discovery] Página ya conocida (offset=%d) — "
+                            "continuando hacia papers más antiguos.",
+                            cfg.discovery_start,
                         )
-                        cfg.discovery_start = 0
-                    else:
-                        cfg.discovery_start += cfg.ids_per_discovery
                 else:
-                    logger.info("[Discovery] Sin resultados, reiniciando offset.")
+                    # Sin resultados = final real del índice de arXiv.
+                    # Ahora sí tiene sentido volver al inicio para buscar
+                    # papers recién publicados.
+                    logger.info(
+                        "[Discovery] Fin del índice alcanzado (offset=%d) — "
+                        "reseteando a 0 para buscar papers recientes.",
+                        cfg.discovery_start,
+                    )
                     cfg.discovery_start = 0
             except Exception as exc:
                 logger.error("[Discovery] Error: %s", exc, exc_info=True)
@@ -157,6 +164,9 @@ class Crawler:
                 saved = skipped = 0
 
                 if not documents:
+                    # fetch_documents devolvió [] — error de red silenciado
+                    # en _fetch_chunk. No marcamos como descargados para
+                    # que se reintenten en el siguiente ciclo.
                     logger.warning(
                         "[Downloader] fetch_documents devolvió 0 documentos "
                         "para %d IDs — posible error de red. Reintentando en el "
