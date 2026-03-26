@@ -1,5 +1,5 @@
-from backend.indexing.preprocessor import TextPreprocessor
-from backend.indexing.tfidf import TFIDFIndexer
-from backend.indexing.pipeline import IndexingPipeline
+from .preprocessor import TextPreprocessor
+from .indexer import TFIndexer
+from .pipeline import IndexingPipeline
 
-__all__ = ["IndexingPipeline", "TextPreprocessor", "TFIDFIndexer"]
+__all__ = ["TextPreprocessor", "TFIndexer", "IndexingPipeline"]
