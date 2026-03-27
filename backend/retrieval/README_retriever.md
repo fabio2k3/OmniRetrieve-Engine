@@ -1,217 +1,196 @@
-# LSI Retrieval Module
+---
+noteId: "658c1130296511f1b0a22758fc0c48d3"
+tags: []
 
-**Latent Semantic Indexing (LSI)** for semantic document retrieval on arXiv papers.
+---
 
-## Overview
+# OmniRetrieve — Módulo de Recuperación
 
-The retrieval module (`Modulo C`) implements a two-phase semantic search system:
+Motor de búsqueda semántica basado en Latent Semantic Indexing (LSI). Lee el índice invertido construido por el módulo `indexing`, aplica TF-IDF y SVD truncada para obtener un espacio semántico latente, y permite lanzar consultas en texto libre devolviendo los artículos más relevantes por similitud coseno.
 
-- **Offline phase** (`LSIModel`): Build the latent semantic space from document corpus using TF-IDF + Truncated SVD + L2 normalization
-- **Online phase** (`LSIRetriever`): Project queries in the latent space and return top-K similar documents using cosine similarity
+---
 
-Reference: Manning et al. (2008), Ch. 18, Sec. 18.1-18.4
-
-## Architecture
+## Estructura de archivos
 
 ```
-TF-IDF Vectorizer
-    |
-    v
-Truncated SVD (k=100)  <- Dimensionality reduction
-    |
-    v
-L2 Normalizer (cosine similarity)
-    |
-    v
-Query Projection & Retrieval
+backend/retrieval/
+├── lsi_model.py      ← fase offline: construye el modelo LSI
+├── lsi_retriever.py  ← fase online: responde consultas semánticas
+├── build_lsi.py      ← entrypoint CLI para la fase offline
+└── __init__.py       ← exports públicos
 ```
 
-## Quick Start
+---
 
-### 1. Build the LSI Model (Offline)
+## Instalación
 
 ```bash
-# Default: k=100 latent concepts
-python -m backend.retrieval.build_lsi
-
-# Custom: k=200 concepts
-python -m backend.retrieval.build_lsi --k 200
-
-# Custom output path
-python -m backend.retrieval.build_lsi --k 150 --out custom_model.pkl
+pip install numpy scipy scikit-learn joblib
 ```
 
-Output: `backend/data/models/lsi_model.pkl`
+| Paquete | Para qué |
+|---|---|
+| `numpy` | Álgebra lineal y matrices densas |
+| `scipy` | Matrices sparse (`lil_matrix`, `csr_matrix`) |
+| `scikit-learn` | `TruncatedSVD`, `Normalizer`, `cosine_similarity` |
+| `joblib` | Serialización del modelo `.pkl` |
 
-Logs: 
-- Console: INFO level
-- File: `backend/data/lsi_build.log`
+---
 
-### 2. Retrieve Documents (Online)
+## Flujo en dos fases
+
+```
+FASE OFFLINE (una vez, o cada N horas)
+──────────────────────────────────────
+index_repository.get_postings_for_matrix()
+        ↓
+  freq + df por (term, doc)
+        ↓
+  Calcular TF-IDF:
+    TF(t,d)  = log(1 + freq)
+    IDF(t)   = log((N+1) / (df+1))
+    W(t,d)   = TF × IDF
+        ↓
+  Matriz sparse  (n_terms × n_docs)
+        ↓
+  TruncatedSVD (k componentes)  +  Normalizer L2
+        ↓
+  docs_latent  (n_docs × k)
+        ↓
+  Guardar .pkl  →  registrar en lsi_log
+
+
+FASE ONLINE (por cada consulta)
+────────────────────────────────
+query en texto libre
+        ↓
+  TextPreprocessor (mismo que indexing)
+        ↓
+  Vectorizar con TF × IDF del corpus
+        ↓
+  SVD.transform()  →  q_latent  (k,)
+        ↓
+  cosine_similarity(q_latent, docs_latent)
+        ↓
+  top-N por score  →  resultados con metadatos
+```
+
+---
+
+## Cómo ejecutar
+
+### Fase offline — construir el modelo
+
+```bash
+# Con parámetros por defecto (k=100)
+python -m backend.retrieval.build_lsi
+
+# Personalizado
+python -m backend.retrieval.build_lsi --k 200 --n-iter 15
+
+# Limitar documentos (útil para pruebas)
+python -m backend.retrieval.build_lsi --k 50 --max-docs 1000
+```
+
+### Parámetros disponibles
+
+```bash
+python -m backend.retrieval.build_lsi \
+  --db        ruta/a/documents.db   # BD a usar (default: data/db/documents.db) \
+  --k         100                   # componentes latentes del SVD (default: 100) \
+  --n-iter    10                    # iteraciones del algoritmo SVD (default: 10) \
+  --out       ruta/modelo.pkl       # ruta de salida del .pkl \
+  --max-docs  5000                  # limitar número de documentos
+```
+
+### Fase online — consultas programáticas
 
 ```python
 from backend.retrieval import LSIRetriever
 
-# Initialize and load model
 retriever = LSIRetriever()
-retriever.load()  # Loads model + DB metadata
+retriever.load()   # carga el .pkl y los metadatos de la BD
 
-# Query
 results = retriever.retrieve("transformer attention mechanisms", top_n=10)
 
-for doc in results:
-    print(f"{doc['title']:<50} | score: {doc['score']:.4f}")
+for r in results:
+    print(f"{r['score']:.4f}  [{r['arxiv_id']}]  {r['title']}")
 ```
 
-Output format (each result):
+Cada resultado contiene:
+
 ```python
 {
-    "score": 0.8932,           # Cosine similarity [0.0, 1.0]
+    "score":    0.8932,          # similitud coseno [0.0, 1.0]
     "arxiv_id": "2301.00123",
-    "title": "Attention Is All You Need",
-    "authors": "Vaswani et al.",
-    "abstract": "...(first 300 chars)...",
-    "url": "https://arxiv.org/pdf/..."
+    "title":    "Attention Is All You Need",
+    "authors":  "Vaswani et al.",
+    "abstract": "...(primeros 300 caracteres)...",
+    "url":      "https://arxiv.org/pdf/2301.00123",
 }
 ```
 
-## Configuration
+---
 
-### LSIModel Parameters
+## Fórmulas
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `k` | 100 | Number of latent concepts (dimensions after SVD) |
-| `max_features` | 50,000 | Max vocabulary size (TF-IDF) |
-| `min_df` | 2 | Ignore terms appearing in fewer than N docs |
-| `stop_words` | "english" | Language for stopword removal |
-| `n_iter` | 10 | SVD iterations (higher = better quality) |
-
-### LSIRetriever Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `top_n` | 10 | Number of results to return |
-| `db_path` | `DB_PATH` | Path to SQLite database |
-| `model_path` | `MODEL_PATH` | Path to saved .pkl model |
-
-## Performance
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| Build (`build()`) | ~5-30s | Corpus size dependent; one-time offline |
-| Query (`retrieve()`) | ~1-10ms | Sub-100ms guarantee for <100K docs |
-| Memory | ~500MB | For 100K docs, k=100 |
-
-## Database Integration
-
-### LSI Log Table
-
-Tracks model build sessions:
-
-```sql
-CREATE TABLE lsi_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    built_at TEXT NOT NULL,           -- ISO timestamp
-    k INTEGER NOT NULL,               -- Latent dimensions
-    n_docs INTEGER NOT NULL,          -- Documents indexed
-    var_explained REAL,               -- Variance explained by SVD
-    model_path TEXT,                  -- Model file path
-    notes TEXT                        -- Optional notes
-);
+```
+TF(t, d)  = log(1 + freq(t, d))          suavizado logarítmico
+IDF(t)    = log((N + 1) / (df(t) + 1))   suavizado Laplace (evita div/0)
+W(t, d)   = TF(t, d) × IDF(t)
 ```
 
-Query build history:
-```sql
-SELECT built_at, k, n_docs, var_explained FROM lsi_log ORDER BY built_at DESC;
-```
+La vectorización de la query usa la misma fórmula TF × IDF, con el `df` real del corpus (guardado en el modelo `.pkl`) para que la proyección al espacio latente sea coherente con la fase offline.
 
-## Testing
+Referencia: Manning et al., *Introduction to Information Retrieval* (2008), Cap. 18.
 
-Run all LSI module tests:
+---
+
+## El modelo `.pkl`
+
+`LSIModel.save()` serializa:
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `svd` | `TruncatedSVD` | SVD ajustado, contiene `components_` para proyectar queries |
+| `normalizer` | `Normalizer` | Normalización L2 ajustada |
+| `docs_latent` | `np.ndarray (n_docs × k)` | Vectores latentes de cada documento |
+| `doc_ids` | `list[str]` | arxiv_ids en el mismo orden que las columnas de la matriz |
+| `term_ids` | `list[int]` | term_ids en el mismo orden que las filas de la matriz |
+| `df_map` | `dict[int, int]` | `term_id → df` del corpus (para vectorizar queries) |
+| `k` | `int` | Número de componentes latentes |
+
+El modelo se guarda en `backend/data/models/lsi_model.pkl` por defecto.
+
+---
+
+## Parámetro k
+
+`k` controla el número de componentes latentes del SVD. Es el parámetro más importante:
+
+| k | Uso recomendado |
+|---|---|
+| 50–100 | Corpus pequeño (< 5.000 docs) |
+| 100–300 | Corpus mediano (5.000–50.000 docs) |
+| 300–500 | Corpus grande (> 50.000 docs) |
+
+Valores más altos capturan más matices semánticos pero aumentan el tiempo de build y el uso de memoria. `k` se ajusta automáticamente si el corpus es menor que el valor configurado (`k = min(k, n_docs - 1)`).
+
+---
+
+## Rendimiento
+
+| Operación | Tiempo estimado | Notas |
+|---|---|---|
+| `build()` | 5–60s | Depende del tamaño del corpus; operación offline |
+| `retrieve()` | < 10ms | Para corpus < 100K docs |
+| Memoria modelo | ~50–500 MB | Para k=100, 10K–100K docs |
+
+---
+
+## Tests
 
 ```bash
-# From project root
+python -m backend.tests.test_retrieval
 python -m pytest backend/tests/test_retrieval.py -v
-
-# Specific test
-python -m pytest backend/tests/test_retrieval.py::test_lsi_model_build -v
-
-# With output
-python -m pytest backend/tests/test_retrieval.py -v -s
 ```
-
-Test types:
-- **Unit**: Model construction (< 1s, in-memory)
-- **Integration**: Full pipeline with temp DB (1-5s)
-- **Semantic**: Query relevance validation
-
-## Logging
-
-### Log Levels
-
-- **INFO**: Build progress, model stats, retrieval ready
-- **DEBUG**: Query details, timing breakdowns
-- **WARNING**: DB errors, missing tables
-
-### Example Log Output
-
-```
-2024-03-25 14:32:15 INFO     retrieval.lsi_model -- [LSIModel] Cargando textos de la BD: backend/data/db/documents.db
-2024-03-25 14:32:15 INFO     retrieval.lsi_model -- [LSIModel] 12543 documentos cargados
-2024-03-25 14:32:19 INFO     retrieval.lsi_model -- [LSIModel] SVD completado. Varianza=67.23% Tiempo=3.8s
-2024-03-25 14:32:20 INFO     retrieval.lsi_model -- [LSIModel] Modelo guardado en backend/data/models/lsi_model.pkl (12543 docs, k=100)
-```
-
-## Troubleshooting
-
-### Q: "Modelo no cargado. Llama a .load() primero"
-
-Retrieve called before model loaded:
-```python
-retriever = LSIRetriever()
-# ❌ retriever.retrieve(...)  # Fails
-retriever.load()
-# ✅ retriever.retrieve(...)  # Works
-```
-
-### Q: "ModuleNotFoundError: No module named 'scikit-learn'"
-
-Install dependencies:
-```bash
-pip install -r backend/requirements.txt
-```
-
-### Q: Query returns only low-scoring results
-
-Possible causes:
-1. Query vocabulary not in training corpus
-2. `k` too small (reduce semantic expressiveness)
-3. Corpus too small for SVD stability
-
-Solutions:
-- Expand corpus
-- Increase `k` parameter
-- Verify corpus quality
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `lsi_model.py` | Offline model builder (phase 1) |
-| `lsi_retriever.py` | Online query engine (phase 2) |
-| `build_lsi.py` | CLI entrypoint with logging |
-| `test_retrieval.py` | Unit + integration tests |
-
-## References
-
-- Manning et al., "Introduction to Information Retrieval" (2008)
-- [Truncated SVD (scikit-learn docs)](https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.TruncatedSVD.html)
-- [LSI in IR](https://en.wikipedia.org/wiki/Latent_semantic_analysis)
-
-## Next Steps
-
-- [ ] Integrate with `backend/main.py` API endpoint
-- [ ] Add query expansion (pseudo-relevance feedback)
-- [ ] Hybrid retrieval: LSI + dense embeddings
-- [ ] Real-time model updates (incremental SVD)

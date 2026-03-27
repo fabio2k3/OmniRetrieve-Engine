@@ -1,3 +1,9 @@
+---
+noteId: "5c4d1fb0296511f1b0a22758fc0c48d3"
+tags: []
+
+---
+
 # OmniRetrieve — Módulo de Adquisición de Datos
 
 Crawler que descubre artículos de IA/ML en arXiv, descarga sus metadatos y extrae el texto completo, almacenándolo en SQLite para su posterior indexación.
@@ -18,11 +24,12 @@ backend/
 │   └── robots.py              ← respeto a robots.txt
 ├── database/
 │   ├── schema.py              ← definición de tablas SQLite
-│   └── repository.py          ← operaciones CRUD
+│   ├── crawler_repository.py  ← operaciones CRUD del crawler
+│   └── index_repository.py   ← operaciones CRUD del índice
 ├── tools/
 │   └── inspect_db.py          ← inspector visual de la DB
 └── tests/
-    └── tests_crawler.py       ← suite de tests
+    └── test_crawler.py       ← suite de tests
 ```
 
 ---
@@ -193,13 +200,13 @@ python -m backend.tools.inspect_db --chunk 2301.12345 --idx 3
 
 ```bash
 # Tests sin red (unit tests locales)
-python -m backend.tests.test_pipeline --skip-network
+python -m backend.tests.test_crawler --skip-network
 
 # Solo verificar integridad de la DB real
-python -m backend.tests.test_pipeline --only-db
+python -m backend.tests.test_crawler --only-db
 
 # Suite completa (requiere conexión a internet)
-python -m backend.tests.test_pipeline
+python -m backend.tests.test_crawler
 ```
 
 ---

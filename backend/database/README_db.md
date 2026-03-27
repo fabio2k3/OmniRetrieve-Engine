@@ -1,301 +1,184 @@
-# OmniRetrieve — Estructura de la Base de Datos
-
-La base de datos SQLite en `backend/data/db/documents.db` es el punto de integración entre todos los módulos del sistema. El módulo de adquisición la escribe; los módulos de indexación y recuperación la leen y extienden.
+---
+noteId: "7c435820296511f1b0a22758fc0c48d3"
+tags: []
 
 ---
 
-## Ubicación y acceso
+# OmniRetrieve — Módulo de Base de Datos
+
+Esquema SQLite unificado y repositorios de acceso a datos para todos los módulos del sistema. Es la única capa que toca la base de datos directamente — el resto de módulos accede siempre a través de las funciones de este módulo.
+
+---
+
+## Estructura de archivos
 
 ```
-backend/data/db/documents.db
-```
-
-Se crea automáticamente al arrancar el crawler. Usa **WAL mode** (Write-Ahead Logging), lo que permite que múltiples módulos lean simultáneamente mientras el crawler escribe, sin bloqueos.
-
-### Conectarse desde cualquier módulo
-
-```python
-from backend.database.schema import get_connection, DB_PATH
-
-conn = get_connection()   # abre conexión con row_factory = sqlite3.Row
-row  = conn.execute("SELECT * FROM documents WHERE arxiv_id = ?", ("2301.12345",)).fetchone()
-print(row["title"])       # acceso por nombre de columna
-conn.close()
-```
-
-### Usar el repository (recomendado)
-
-```python
-from backend.database import repository as repo
-
-doc    = repo.get_document("2301.12345")
-stats  = repo.get_stats()
-chunks = repo.get_chunks("2301.12345")
+backend/database/
+├── schema.py              ← DDL completo + get_connection() + init_db()
+├── crawler_repository.py  ← operaciones de lectura/escritura del crawler
+├── index_repository.py    ← operaciones de lectura/escritura del indexador
+└── __init__.py            ← exports públicos de todo el módulo
 ```
 
 ---
 
-## Tablas actuales
+## Tablas
 
-El módulo de adquisición crea y mantiene **3 tablas**. El módulo de indexación puede añadir las suyas propias extendiendo `schema.py`.
+### Módulo crawler
+
+| Tabla | Descripción |
+|---|---|
+| `documents` | Metadatos de cada artículo + texto extraído del PDF |
+| `chunks` | Fragmentos de texto a nivel de párrafo (reservado para embeddings) |
+| `crawl_log` | Registro de cada ejecución del crawler |
+
+### Módulo indexing
+
+| Tabla | Descripción |
+|---|---|
+| `terms` | Vocabulario: una fila por token único con su `df` |
+| `postings` | Índice invertido: frecuencia cruda (`freq`) por par (término, documento) |
+| `index_meta` | Almacén clave/valor para auditoría del indexador |
+
+### Módulo retrieval
+
+| Tabla | Descripción |
+|---|---|
+| `lsi_log` | Registro de cada construcción del modelo LSI |
 
 ---
 
-### Tabla `documents`
+## Schema
 
-Cada fila representa un artículo de arXiv con sus metadatos y el texto extraído.
+### `documents`
 
 ```sql
 CREATE TABLE documents (
-    arxiv_id        TEXT PRIMARY KEY,
-    title           TEXT NOT NULL,
-    authors         TEXT,
-    abstract        TEXT,
-    categories      TEXT,
-    published       TEXT,
-    updated         TEXT,
-    pdf_url         TEXT,
-    fetched_at      TEXT,
-    full_text       TEXT,
-    text_length     INTEGER,
-    pdf_downloaded  INTEGER NOT NULL DEFAULT 0,
-    indexed_at      TEXT,
-    index_error     TEXT
+    arxiv_id         TEXT PRIMARY KEY,
+    title            TEXT NOT NULL,
+    authors          TEXT,
+    abstract         TEXT,
+    categories       TEXT,
+    published        TEXT,
+    updated          TEXT,
+    pdf_url          TEXT,
+    fetched_at       TEXT,          -- timestamp de descarga de metadatos
+    full_text        TEXT,          -- texto completo extraído del PDF/HTML
+    text_length      INTEGER,
+    pdf_downloaded   INTEGER NOT NULL DEFAULT 0,
+    --   0 = pendiente de descarga
+    --   1 = descargado con éxito
+    --   2 = error en descarga/extracción
+    indexed_at       TEXT,          -- timestamp de extracción del PDF (crawler)
+    index_error      TEXT,          -- mensaje de error si pdf_downloaded = 2
+    indexed_tfidf_at TEXT           -- timestamp de indexación TF; NULL = pendiente
 );
 ```
 
-| Columna | Tipo | Descripción |
-|---|---|---|
-| `arxiv_id` | TEXT PK | ID del paper, ej. `2301.12345` |
-| `title` | TEXT | Título completo |
-| `authors` | TEXT | Autores separados por coma |
-| `abstract` | TEXT | Resumen. **Siempre disponible** desde el primer ciclo |
-| `categories` | TEXT | Categorías arXiv, ej. `cs.AI, cs.LG, cs.CV` |
-| `published` | TEXT | Fecha de publicación ISO-8601, ej. `2023-01-30T00:00:00Z` |
-| `updated` | TEXT | Fecha de última actualización ISO-8601 |
-| `pdf_url` | TEXT | URL del PDF, ej. `https://arxiv.org/pdf/2301.12345v2` |
-| `fetched_at` | TEXT | Timestamp de cuando se descargaron los metadatos |
-| `full_text` | TEXT | Texto completo extraído y limpio (HTML o PDF) |
-| `text_length` | INTEGER | Longitud en caracteres de `full_text` |
-| `pdf_downloaded` | INTEGER | Estado de extracción de texto (ver abajo) |
-| `indexed_at` | TEXT | Timestamp de la última extracción de texto |
-| `index_error` | TEXT | Mensaje de error si `pdf_downloaded = 2` |
-
-#### Estado `pdf_downloaded`
-
-| Valor | Significado | `full_text` |
-|---|---|---|
-| `0` | Pendiente — metadatos descargados, texto no extraído aún | `NULL` |
-| `1` | ✅ Texto extraído y guardado correctamente | Disponible |
-| `2` | ❌ Error en la extracción (PDF muy grande, 404, timeout, etc.) | `NULL` |
-
-#### Índices disponibles
+### `postings`
 
 ```sql
-idx_doc_categories   ON documents(categories)
-idx_doc_published    ON documents(published)
-idx_doc_pdf_status   ON documents(pdf_downloaded)
+CREATE TABLE postings (
+    term_id  INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,
+    doc_id   TEXT    NOT NULL REFERENCES documents(arxiv_id) ON DELETE CASCADE,
+    freq     INTEGER NOT NULL DEFAULT 0,   -- frecuencia cruda del término en el doc
+    PRIMARY KEY (term_id, doc_id)
+);
 ```
+
+`postings` guarda solo frecuencias crudas (`freq`). Los pesos TF-IDF se calculan en el módulo `retrieval` con la fórmula que considere apropiada.
 
 ---
 
-### Tabla `chunks`
+## Repositorios
 
-El `full_text` de cada documento dividido en fragmentos de ~1000 caracteres preservando párrafos. Son las unidades de búsqueda para recuperación densa (embeddings).
+### `crawler_repository.py`
 
-```sql
-CREATE TABLE chunks (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    arxiv_id    TEXT    NOT NULL REFERENCES documents(arxiv_id) ON DELETE CASCADE,
-    chunk_index INTEGER NOT NULL,
-    text        TEXT    NOT NULL,
-    char_count  INTEGER,
-    embedding   BLOB,
-    embedded_at TEXT,
-    created_at  TEXT NOT NULL,
-    UNIQUE(arxiv_id, chunk_index)
-);
-```
+Operaciones del módulo de adquisición.
 
-| Columna | Tipo | Descripción |
-|---|---|---|
-| `id` | INTEGER PK | Autoincremental |
-| `arxiv_id` | TEXT FK | Referencia al documento padre |
-| `chunk_index` | INTEGER | Posición del chunk en el doc (0-based) |
-| `text` | TEXT | Texto del fragmento (~1000 chars) |
-| `char_count` | INTEGER | Longitud del fragmento |
-| `embedding` | BLOB | Vector serializado como `float32` bytes — `NULL` hasta fase 2 |
-| `embedded_at` | TEXT | Timestamp de cuando se generó el embedding |
-| `created_at` | TEXT | Timestamp de creación del chunk |
-
-#### Trabajar con embeddings (fase 2)
-
-```python
-import numpy as np
-
-# Guardar
-embedding_bytes = np.array([0.1, 0.2, ...], dtype="float32").tobytes()
-repo.save_chunk_embedding(chunk_id=42, embedding=embedding_bytes)
-
-# Leer
-row = conn.execute("SELECT embedding FROM chunks WHERE id = 42").fetchone()
-vector = np.frombuffer(row["embedding"], dtype="float32")
-```
-
-#### Índices disponibles
-
-```sql
-idx_chunks_arxiv    ON chunks(arxiv_id)
-idx_chunks_embedded ON chunks(embedded_at)
-```
-
----
-
-### Tabla `crawl_log`
-
-Una fila por sesión del crawler, útil para monitorización y auditoría.
-
-```sql
-CREATE TABLE crawl_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at      TEXT NOT NULL,
-    finished_at     TEXT,
-    ids_discovered  INTEGER DEFAULT 0,
-    docs_downloaded INTEGER DEFAULT 0,
-    pdfs_indexed    INTEGER DEFAULT 0,
-    errors          INTEGER DEFAULT 0,
-    notes           TEXT
-);
-```
-
-| Columna | Descripción |
+| Función | Descripción |
 |---|---|
-| `started_at` | Timestamp de inicio de sesión |
-| `finished_at` | `NULL` si el crawler sigue corriendo |
-| `ids_discovered` | IDs nuevos encontrados |
-| `docs_downloaded` | Metadatos descargados |
-| `pdfs_indexed` | Textos extraídos correctamente |
-| `errors` | Número de errores en la sesión |
+| `upsert_document(...)` | Inserta o actualiza metadatos de un artículo |
+| `save_pdf_text(arxiv_id, full_text)` | Persiste el texto extraído y marca `pdf_downloaded=1` |
+| `save_pdf_error(arxiv_id, error)` | Registra un fallo y marca `pdf_downloaded=2` |
+| `get_pending_pdf_ids(limit)` | IDs de documentos con `pdf_downloaded=0` |
+| `document_exists(arxiv_id)` | Comprueba si un documento está en la BD |
+| `get_document(arxiv_id)` | Devuelve la fila completa de un documento |
+| `save_chunks(arxiv_id, texts)` | Reemplaza los chunks de un documento |
+| `log_crawl_start()` | Abre una entrada en `crawl_log`, devuelve su id |
+| `log_crawl_end(log_id, ...)` | Cierra la entrada con estadísticas |
+| `get_stats()` | Resumen del estado de la BD |
+
+### `index_repository.py`
+
+Operaciones del módulo de indexación y del módulo de recuperación.
+
+| Función | Descripción |
+|---|---|
+| `clear_index()` | Borra `terms` y `postings` (para reindex completo) |
+| `upsert_terms(df_map)` | Inserta términos nuevos y acumula `df` de existentes |
+| `flush_postings(batch)` | Inserta o actualiza un lote de `(term_id, doc_id, freq)` |
+| `mark_documents_indexed(arxiv_ids)` | Pone `indexed_tfidf_at = now` en los documentos indexados |
+| `save_index_meta(stats)` | Persiste metadatos de auditoría en `index_meta` |
+| `get_unindexed_documents(field, ...)` | Generador de docs con PDF descargado e `indexed_tfidf_at IS NULL` |
+| `get_index_stats()` | vocab_size, total_docs, total_postings, meta |
+| `get_top_terms(arxiv_id, n)` | Top N términos por frecuencia de un documento |
+| `get_postings_for_term(word)` | Posting list de un término: `[{doc_id, freq}]` |
+| `get_postings_for_matrix(max_docs)` | Datos crudos para construir la matriz TF-IDF en retrieval |
+| `get_document_metadata(arxiv_ids)` | Metadatos de documentos para mostrar en resultados |
 
 ---
 
-## Queries útiles
+## Uso
 
-### Para el módulo de indexación
-
-```sql
--- Documentos con texto listo para indexar
-SELECT arxiv_id, title, full_text, text_length, categories, published
-FROM documents
-WHERE pdf_downloaded = 1
-ORDER BY published DESC;
-
--- Solo abstracts (disponibles para TODOS, incluso sin full_text)
-SELECT arxiv_id, title, abstract, categories, published
-FROM documents
-ORDER BY published DESC;
-
--- Longitud promedio del corpus (necesario para BM25)
-SELECT
-    COUNT(*)         AS total_docs,
-    AVG(text_length) AS avg_chars,
-    MIN(text_length) AS min_chars,
-    MAX(text_length) AS max_chars
-FROM documents
-WHERE pdf_downloaded = 1;
-
--- Distribución por categoría
-SELECT categories, COUNT(*) AS n
-FROM documents
-WHERE pdf_downloaded = 1
-GROUP BY categories
-ORDER BY n DESC;
-```
-
-### Para el módulo de embeddings
-
-```sql
--- Chunks pendientes de embeddizar
-SELECT id, arxiv_id, chunk_index, text
-FROM chunks
-WHERE embedding IS NULL
-ORDER BY arxiv_id, chunk_index;
-
--- Todos los chunks de un documento
-SELECT chunk_index, char_count, text
-FROM chunks
-WHERE arxiv_id = '2301.12345'
-ORDER BY chunk_index;
-
--- Progreso de embeddings
-SELECT
-    COUNT(*)                          AS total_chunks,
-    SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded,
-    SUM(CASE WHEN embedding IS NULL     THEN 1 ELSE 0 END) AS pending
-FROM chunks;
-```
-
-### Monitorización
-
-```sql
--- Estado general
-SELECT
-    COUNT(*)                                            AS total,
-    SUM(CASE WHEN pdf_downloaded = 1 THEN 1 ELSE 0 END) AS con_texto,
-    SUM(CASE WHEN pdf_downloaded = 0 THEN 1 ELSE 0 END) AS pendientes,
-    SUM(CASE WHEN pdf_downloaded = 2 THEN 1 ELSE 0 END) AS errores
-FROM documents;
-
--- Últimos 10 documentos indexados
-SELECT arxiv_id, title, text_length, indexed_at
-FROM documents
-WHERE pdf_downloaded = 1
-ORDER BY indexed_at DESC
-LIMIT 10;
-
--- Errores recientes
-SELECT arxiv_id, index_error, indexed_at
-FROM documents
-WHERE pdf_downloaded = 2
-ORDER BY indexed_at DESC;
-```
-
----
-
-## Cómo añadir tablas para el módulo de indexación
-
-Añade las nuevas tablas directamente en `backend/database/schema.py` dentro del bloque `_DDL`:
+### Inicializar la BD
 
 ```python
-# En schema.py, dentro de _DDL = """..."""
-CREATE TABLE IF NOT EXISTS terms (
-    term_id  INTEGER PRIMARY KEY,
-    term     TEXT    NOT NULL UNIQUE,
-    df       INTEGER DEFAULT 0   -- document frequency
-);
+from backend.database.schema import init_db
 
-CREATE TABLE IF NOT EXISTS postings (
-    term_id  INTEGER REFERENCES terms(term_id),
-    arxiv_id TEXT    REFERENCES documents(arxiv_id),
-    tf       INTEGER DEFAULT 1,
-    positions TEXT,              -- JSON: [12, 45, 103, ...]
-    PRIMARY KEY (term_id, arxiv_id)
-);
+init_db()          # crea todas las tablas si no existen (idempotente)
+init_db(db_path)   # ruta personalizada
 ```
 
-Luego llama a `init_db()` una vez para crear las tablas nuevas sin tocar las existentes:
+### Desde el crawler
 
 ```python
-from backend.database.schema import init_db, DB_PATH
-init_db(DB_PATH)   # CREATE TABLE IF NOT EXISTS — seguro de llamar varias veces
+from backend.database.crawler_repository import upsert_document, save_pdf_text
+
+upsert_document(arxiv_id="2301.001", title="...", ...)
+save_pdf_text("2301.001", full_text="...")
+```
+
+### Desde el indexador
+
+```python
+from backend.database.index_repository import (
+    get_unindexed_documents, upsert_terms,
+    flush_postings, mark_documents_indexed,
+)
+
+for arxiv_id, texto in get_unindexed_documents(field="full_text"):
+    ...  # tokenizar y contar
+
+all_terms = upsert_terms(df_map)
+flush_postings(batch)
+mark_documents_indexed(list(doc_ids))
+```
+
+### Desde retrieval
+
+```python
+from backend.database.index_repository import get_postings_for_matrix
+
+postings, df_map, doc_ids, term_ids, n_docs = get_postings_for_matrix()
+# → construir matriz TF-IDF y aplicar SVD
 ```
 
 ---
 
-## Notas importantes
+## Diseño
 
-- **WAL mode activo** — el crawler puede escribir mientras otros módulos leen, sin bloqueos.
-- **`abstract` siempre disponible** — aunque `full_text` sea `NULL`, el abstract se descarga en el primer ciclo. Puede usarse como fallback para indexar documentos aún sin texto completo.
-- **`full_text` ya está limpio** — sin números de página, sin ecuaciones LaTeX, sin referencias bibliográficas, sin afiliaciones de autores. Listo para tokenizar directamente.
-- **Chunks opcionales para indexación clásica** — la tabla `chunks` está diseñada para embeddings. Para un índice invertido BM25/TF-IDF es más eficiente trabajar con `full_text` directamente.
-- **FK con CASCADE** — si se borra un documento, sus chunks se borran automáticamente.
+- **Stateless** — cada función abre y cierra su propia conexión. No hay objetos de conexión persistentes.
+- **Idempotente** — todos los inserts usan `INSERT OR IGNORE` o `ON CONFLICT DO UPDATE`. Es seguro llamarlos varias veces con los mismos datos.
+- **Sin pesos calculados** — `postings` guarda solo `freq` (entero). Ninguna función de este módulo calcula TF-IDF; esa responsabilidad pertenece a `retrieval/`.
+- **WAL mode** — todas las conexiones activan `PRAGMA journal_mode = WAL` para permitir lectores concurrentes mientras el crawler escribe.
