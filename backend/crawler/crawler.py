@@ -122,23 +122,13 @@ class Crawler:
                     # nuevos como si la página ya era conocida. Resetear
                     # a 0 aquí significaría re-escanear páginas que ya
                     # tenemos en lugar de continuar explorando el índice.
-                    cfg.discovery_start += cfg.ids_per_discovery
+                    cfg.discovery_start += len(ids)
                     if added == 0:
                         logger.info(
                             "[Discovery] Página ya conocida (offset=%d) — "
                             "continuando hacia papers más antiguos.",
                             cfg.discovery_start,
                         )
-                else:
-                    # Sin resultados = final real del índice de arXiv.
-                    # Ahora sí tiene sentido volver al inicio para buscar
-                    # papers recién publicados.
-                    logger.info(
-                        "[Discovery] Fin del índice alcanzado (offset=%d) — "
-                        "reseteando a 0 para buscar papers recientes.",
-                        cfg.discovery_start,
-                    )
-                    cfg.discovery_start = 0
             except Exception as exc:
                 logger.error("[Discovery] Error: %s", exc, exc_info=True)
             self._stop.wait(cfg.discovery_interval)

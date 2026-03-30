@@ -65,12 +65,12 @@ def _parse_args() -> argparse.Namespace:
 
     # Crawler
     g = p.add_argument_group("crawler")
-    g.add_argument("--ids-per-discovery",  type=int,   default=100,   help="IDs por ciclo de discovery.")
-    g.add_argument("--batch-size",         type=int,   default=10,    help="Metadatos por ciclo.")
-    g.add_argument("--pdf-batch",          type=int,   default=5,     help="PDFs por ciclo.")
-    g.add_argument("--discovery-interval", type=float, default=120.0, help="Segundos entre ciclos de discovery.")
-    g.add_argument("--download-interval",  type=float, default=30.0,  help="Segundos entre ciclos de metadatos.")
-    g.add_argument("--pdf-interval",       type=float, default=60.0,  help="Segundos entre ciclos de PDF.")
+    g.add_argument("--ids-per-discovery",  type=int,   default=500,   help="IDs por ciclo de discovery.")
+    g.add_argument("--batch-size",         type=int,   default=50,    help="Metadatos por ciclo.")
+    g.add_argument("--pdf-batch",          type=int,   default=10,     help="PDFs por ciclo.")
+    g.add_argument("--discovery-interval", type=float, default=600.0, help="Segundos entre ciclos de discovery.")
+    g.add_argument("--download-interval",  type=float, default=60.0,  help="Segundos entre ciclos de metadatos.")
+    g.add_argument("--pdf-interval",       type=float, default=1.0,  help="Segundos entre ciclos de PDF.")
 
     # Indexing
     g = p.add_argument_group("indexing")

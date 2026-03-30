@@ -70,13 +70,22 @@ class LSIRetriever:
         if not self.model.term_ids:
             return {}
 
-        placeholders = ",".join("?" * len(self.model.term_ids))
+        # SQLite tiene un límite de 999 variables por consulta (SQLITE_LIMIT_VARIABLE_NUMBER).
+        # Si el vocabulario es grande, la consulta se parte en lotes para no superarlo.
+        _CHUNK_SIZE = 900
+        term_ids = self.model.term_ids
+        rows = []
         conn = get_connection(db_path)
         try:
-            rows = conn.execute(
-                f"SELECT term_id, word FROM terms WHERE term_id IN ({placeholders})",
-                self.model.term_ids,
-            ).fetchall()
+            for offset in range(0, len(term_ids), _CHUNK_SIZE):
+                chunk = term_ids[offset : offset + _CHUNK_SIZE]
+                placeholders = ",".join("?" * len(chunk))
+                rows.extend(
+                    conn.execute(
+                        f"SELECT term_id, word FROM terms WHERE term_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
         finally:
             conn.close()
 
