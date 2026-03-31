@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from backend.database.schema import DB_PATH
+from backend.embedding.chroma_store import CHROMA_PATH
 from backend.retrieval.lsi_model import MODEL_PATH
 
 
@@ -65,16 +66,17 @@ class OrchestratorConfig:
     """
 
     # rutas
-    db_path:    Path = field(default_factory=lambda: DB_PATH)
-    model_path: Path = field(default_factory=lambda: MODEL_PATH)
+    db_path:     Path = field(default_factory=lambda: DB_PATH)
+    model_path:  Path = field(default_factory=lambda: MODEL_PATH)
+    chroma_path: Path = field(default_factory=lambda: CHROMA_PATH)
 
     # crawler
-    ids_per_discovery:  int   = 100
-    batch_size:         int   = 10
-    pdf_batch_size:     int   = 5
+    ids_per_discovery:  int   = 500
+    batch_size:         int   = 50
+    pdf_batch_size:     int   = 10
     discovery_interval: float = 120.0
     download_interval:  float = 30.0
-    pdf_interval:       float = 60.0
+    pdf_interval:       float = 5.0
 
     # indexing watcher
     pdf_threshold:       int   = 10
@@ -85,3 +87,10 @@ class OrchestratorConfig:
     lsi_rebuild_interval: float = 3600.0
     lsi_k:                int   = 100
     lsi_min_docs:         int   = 10
+
+    # Embedding vectorial
+    embed_model:            str   = "all-MiniLM-L6-v2"
+    embed_batch_size:       int   = 64
+    embed_poll_interval:    float = 60.0
+    embed_threshold:        int   = 10      # chunks sin embedding para disparar pipeline
+    vector_reload_interval: float = 300.0   # segundos entre recargas de la matriz vectorial
