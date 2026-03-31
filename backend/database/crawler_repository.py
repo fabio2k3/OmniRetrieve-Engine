@@ -195,28 +195,6 @@ def save_chunks(
             conn.close()
 
 
-def save_chunk_embedding(
-    chunk_id:  int,
-    embedding: bytes,
-    db_path:   Path = DB_PATH,
-) -> None:
-    """
-    Persiste un vector de embedding serializado para un chunk.
-    embedding debe ser numpy_array.astype('float32').tobytes()
-    """
-    sql = """
-        UPDATE chunks
-        SET embedding   = ?,
-            embedded_at = ?
-        WHERE id = ?
-    """
-    conn = get_connection(db_path)
-    try:
-        conn.execute(sql, (embedding, _now(), chunk_id))
-        conn.commit()
-    finally:
-        conn.close()
-
 
 def get_chunks(
     arxiv_id: str,
@@ -233,15 +211,42 @@ def get_chunks(
         conn.close()
 
 
+def mark_chunk_embedded(
+    chunk_id: int,
+    db_path:  Path = DB_PATH,
+) -> None:
+    """
+    Marca un chunk como vectorizado en ChromaDB estableciendo embedded_at.
+    Llamado por EmbeddingPipeline tras insertar el vector en ChromaDB.
+    """
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            "UPDATE chunks SET embedded_at = ? WHERE id = ?",
+            (_now(), chunk_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_unembedded_chunks(
     limit:   int  = 100,
     db_path: Path = DB_PATH,
-) -> List[sqlite3.Row]:
-    """Devuelve chunks que aún no tienen embedding (para el módulo embedder)."""
+) -> list:
+    """
+    Devuelve hasta limit chunks con embedded_at IS NULL.
+    Criterio canonico de pendiente: chunk existe en SQLite pero no en ChromaDB.
+    """
     conn = get_connection(db_path)
     try:
         return conn.execute(
-            "SELECT * FROM chunks WHERE embedding IS NULL LIMIT ?", (limit,)
+            "SELECT id, arxiv_id, chunk_index, text, char_count "
+            "FROM   chunks "
+            "WHERE  embedded_at IS NULL "
+            "ORDER  BY id "
+            "LIMIT  ?",
+            (limit,),
         ).fetchall()
     finally:
         conn.close()
@@ -304,7 +309,7 @@ def get_stats(db_path: Path = DB_PATH) -> dict:
         errors   = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 2").fetchone()[0]
         pending  = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 0").fetchone()[0]
         chunks   = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        embedded = conn.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()[0]
+        embedded = conn.execute("SELECT COUNT(*) FROM chunks WHERE embedded_at IS NOT NULL").fetchone()[0]
         return {
             "total_documents": total,
             "pdf_indexed":     indexed,

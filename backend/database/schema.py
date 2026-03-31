@@ -7,7 +7,7 @@ Tablas
 ------
 Módulo crawler (adquisición)
     documents   — metadatos de artículos + texto extraído del PDF
-    chunks      — fragmentos de texto a nivel de párrafo (embedding reservado)
+    chunks      — fragmentos de texto a nivel de párrafo (embedded_at controla estado en ChromaDB)
     crawl_log   — una fila por ejecución del crawler
 
 Módulo indexing (índice invertido)
@@ -64,8 +64,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_index     INTEGER NOT NULL,
     text            TEXT    NOT NULL,
     char_count      INTEGER,
-    embedding       BLOB,
-    embedded_at     TEXT,
+    embedded_at     TEXT,              -- NULL = pendiente; timestamp = vectorizado en ChromaDB
     created_at      TEXT    NOT NULL,
     UNIQUE(arxiv_id, chunk_index)
 );
@@ -119,8 +118,8 @@ CREATE TABLE IF NOT EXISTS lsi_log (
 CREATE INDEX IF NOT EXISTS idx_doc_categories  ON documents(categories);
 CREATE INDEX IF NOT EXISTS idx_doc_published   ON documents(published);
 CREATE INDEX IF NOT EXISTS idx_doc_pdf_status  ON documents(pdf_downloaded);
-CREATE INDEX IF NOT EXISTS idx_chunks_arxiv    ON chunks(arxiv_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded_at);
+CREATE INDEX IF NOT EXISTS idx_chunks_arxiv     ON chunks(arxiv_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_embedded  ON chunks(embedded_at);
 CREATE INDEX IF NOT EXISTS idx_postings_doc    ON postings(doc_id);
 CREATE INDEX IF NOT EXISTS idx_postings_term   ON postings(term_id);
 CREATE INDEX IF NOT EXISTS idx_terms_word      ON terms(word);

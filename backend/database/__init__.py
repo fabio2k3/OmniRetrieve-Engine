@@ -3,6 +3,7 @@ from .crawler_repository import (
     upsert_document, save_pdf_text, save_pdf_error,
     get_pending_pdf_ids, get_document, document_exists,
     save_chunks, get_chunks,
+    get_unembedded_chunks, mark_chunk_embedded,
     log_crawl_start, log_crawl_end, get_stats,
 )
 from .index_repository import (
@@ -19,6 +20,7 @@ __all__ = [
     "upsert_document", "save_pdf_text", "save_pdf_error",
     "get_pending_pdf_ids", "get_document", "document_exists",
     "save_chunks", "get_chunks",
+    "get_unembedded_chunks", "mark_chunk_embedded",
     "log_crawl_start", "log_crawl_end", "get_stats",
     # index_repository
     "clear_index", "upsert_terms", "flush_postings", "save_index_meta",
