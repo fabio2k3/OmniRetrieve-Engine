@@ -12,7 +12,6 @@ Hilos
 run_crawler_thread      — ejecuta el crawler de arXiv de forma continua.
 run_indexing_thread     — detecta PDFs nuevos y dispara indexación incremental.
 run_lsi_rebuild_thread  — reconstruye el modelo LSI cada N segundos.
-run_embedding_thread    — detecta chunks sin embedding y los procesa.
 """
 
 from __future__ import annotations
@@ -24,12 +23,9 @@ from typing import Optional
 
 from backend.database.schema import get_connection
 from backend.crawler.crawler import Crawler, CrawlerConfig
-from backend.embedding.embedder import Embedder
-from backend.embedding.pipeline import EmbeddingPipeline
 from backend.indexing.pipeline import IndexingPipeline
 from backend.retrieval.lsi_model import LSIModel
 from backend.retrieval.lsi_retriever import LSIRetriever
-from backend.retrieval.vector_retriever import VectorRetriever
 from .config import OrchestratorConfig
 
 log = logging.getLogger(__name__)
@@ -218,76 +214,3 @@ def _try_rebuild(
 
     except Exception as exc:
         log.error("[lsi] Error durante rebuild: %s", exc, exc_info=True)
-
-# ---------------------------------------------------------------------------
-# Hilo 4 — Embedding watcher
-# ---------------------------------------------------------------------------
-
-def run_embedding_thread(
-    cfg:      OrchestratorConfig,
-    shutdown: threading.Event,
-    do_embed: callable,
-) -> None:
-    """
-    Sondea la BD cada embed_poll_interval segundos.
-    Llama a do_embed() cuando hay >= embed_threshold chunks sin embedding.
-
-    Tras cada ejecución exitosa de do_embed(), el orquestador recarga la
-    matriz vectorial del VectorRetriever. Esa lógica vive en do_embed()
-    para mantener este módulo sin estado.
-
-    Parámetros
-    ----------
-    cfg      : configuración del orquestador.
-    shutdown : evento de parada compartido.
-    do_embed : callable sin argumentos que ejecuta EmbeddingPipeline y
-               recarga el VectorRetriever. Separado para facilitar tests.
-    """
-    log.info(
-        "[embedding] Watcher iniciado (umbral=%d chunks, poll=%ds).",
-        cfg.embed_threshold, int(cfg.embed_poll_interval),
-    )
-
-    # Primer intento sin esperar el intervalo para embeber chunks existentes
-    _try_embed(cfg, do_embed)
-
-    while not shutdown.is_set():
-        shutdown.wait(timeout=cfg.embed_poll_interval)
-        if shutdown.is_set():
-            break
-        _try_embed(cfg, do_embed)
-
-    log.info("[embedding] Watcher detenido.")
-
-
-def _try_embed(cfg: OrchestratorConfig, do_embed: callable) -> None:
-    """
-    Comprueba si hay suficientes chunks pendientes y ejecuta do_embed().
-
-    No lanza excepciones: los errores se loguean y se ignoran para que
-    el hilo de embedding no muera ante un fallo puntual.
-    """
-    try:
-        conn = get_connection(cfg.db_path)
-        pending = conn.execute(
-            "SELECT COUNT(*) FROM chunks WHERE embedded_at IS NULL"
-        ).fetchone()[0]
-        conn.close()
-    except Exception as exc:
-        log.warning("[embedding] Error al consultar BD: %s", exc)
-        return
-
-    if pending >= cfg.embed_threshold:
-        log.info(
-            "[embedding] %d chunks sin embedding >= umbral %d — procesando…",
-            pending, cfg.embed_threshold,
-        )
-        try:
-            do_embed()
-        except Exception as exc:
-            log.error("[embedding] Error durante embedding: %s", exc, exc_info=True)
-    else:
-        log.debug(
-            "[embedding] %d chunks pendientes (umbral=%d) — esperando.",
-            pending, cfg.embed_threshold,
-        )
