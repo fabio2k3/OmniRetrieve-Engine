@@ -20,14 +20,12 @@ from typing import List, Optional
 
 from .schema import DB_PATH, get_connection
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 # ---------------------------------------------------------------------------
 # Operaciones sobre documentos
@@ -162,92 +160,6 @@ def document_exists(arxiv_id: str, db_path: Path = DB_PATH) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Operaciones sobre chunks
-# ---------------------------------------------------------------------------
-
-def save_chunks(
-    arxiv_id: str,
-    texts:    List[str],
-    conn:     Optional[sqlite3.Connection] = None,
-    db_path:  Path = DB_PATH,
-) -> None:
-    """
-    Reemplaza todos los chunks de *arxiv_id* con *texts*.
-    Pasa una conexión abierta para incluir esta operación en una transacción mayor.
-    """
-    own_conn = conn is None
-    if own_conn:
-        conn = get_connection(db_path)
-    try:
-        conn.execute("DELETE FROM chunks WHERE arxiv_id = ?", (arxiv_id,))
-        now = _now()
-        conn.executemany(
-            """
-            INSERT INTO chunks (arxiv_id, chunk_index, text, char_count, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [(arxiv_id, i, text, len(text), now) for i, text in enumerate(texts)],
-        )
-        if own_conn:
-            conn.commit()
-    finally:
-        if own_conn:
-            conn.close()
-
-
-def save_chunk_embedding(
-    chunk_id:  int,
-    embedding: bytes,
-    db_path:   Path = DB_PATH,
-) -> None:
-    """
-    Persiste un vector de embedding serializado para un chunk.
-    embedding debe ser numpy_array.astype('float32').tobytes()
-    """
-    sql = """
-        UPDATE chunks
-        SET embedding   = ?,
-            embedded_at = ?
-        WHERE id = ?
-    """
-    conn = get_connection(db_path)
-    try:
-        conn.execute(sql, (embedding, _now(), chunk_id))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def get_chunks(
-    arxiv_id: str,
-    db_path:  Path = DB_PATH,
-) -> List[sqlite3.Row]:
-    """Devuelve todos los chunks de un documento ordenados por chunk_index."""
-    conn = get_connection(db_path)
-    try:
-        return conn.execute(
-            "SELECT * FROM chunks WHERE arxiv_id = ? ORDER BY chunk_index",
-            (arxiv_id,),
-        ).fetchall()
-    finally:
-        conn.close()
-
-
-def get_unembedded_chunks(
-    limit:   int  = 100,
-    db_path: Path = DB_PATH,
-) -> List[sqlite3.Row]:
-    """Devuelve chunks que aún no tienen embedding (para el módulo embedder)."""
-    conn = get_connection(db_path)
-    try:
-        return conn.execute(
-            "SELECT * FROM chunks WHERE embedding IS NULL LIMIT ?", (limit,)
-        ).fetchall()
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
 # Crawl log
 # ---------------------------------------------------------------------------
 
@@ -291,27 +203,24 @@ def log_crawl_end(
     finally:
         conn.close()
 
-
 # ---------------------------------------------------------------------------
 # Estadísticas
 # ---------------------------------------------------------------------------
 
 def get_stats(db_path: Path = DB_PATH) -> dict:
+    from .chunk_repository import get_chunk_stats
     conn = get_connection(db_path)
     try:
-        total    = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        indexed  = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 1").fetchone()[0]
-        errors   = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 2").fetchone()[0]
-        pending  = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 0").fetchone()[0]
-        chunks   = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        embedded = conn.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()[0]
-        return {
-            "total_documents": total,
-            "pdf_indexed":     indexed,
-            "pdf_pending":     pending,
-            "pdf_errors":      errors,
-            "total_chunks":    chunks,
-            "embedded_chunks": embedded,
-        }
+        total   = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        indexed = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 1").fetchone()[0]
+        errors  = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 2").fetchone()[0]
+        pending = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 0").fetchone()[0]
     finally:
         conn.close()
+    return {
+        "total_documents": total,
+        "pdf_indexed":     indexed,
+        "pdf_pending":     pending,
+        "pdf_errors":      errors,
+        **get_chunk_stats(db_path),
+    }
