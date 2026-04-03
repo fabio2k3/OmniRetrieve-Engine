@@ -12,6 +12,7 @@ Hilos
 run_crawler_thread      — ejecuta el crawler de arXiv de forma continua.
 run_indexing_thread     — detecta PDFs nuevos y dispara indexación incremental.
 run_lsi_rebuild_thread  — reconstruye el modelo LSI cada N segundos.
+run_embedding_thread    — detecta chunks sin embedding y dispara EmbeddingPipeline.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from backend.database.schema import get_connection
+from backend.database.chunk_repository import get_chunk_stats
 from backend.crawler.crawler import Crawler, CrawlerConfig
 from backend.indexing.pipeline import IndexingPipeline
 from backend.retrieval.lsi_model import LSIModel
@@ -192,7 +194,7 @@ def _try_rebuild(
         log.info("[lsi] Solo %d docs indexados (mínimo %d) — omitiendo rebuild.",
                  n_indexed, cfg.lsi_min_docs)
         return
-
+    
     # Ajustar k al tamaño real del corpus (SVD requiere k < n_docs)
     k = min(cfg.lsi_k, n_indexed - 1)
     log.info("[lsi] Reconstruyendo modelo (n_indexed=%d, k=%d)…", n_indexed, k)
@@ -214,3 +216,69 @@ def _try_rebuild(
 
     except Exception as exc:
         log.error("[lsi] Error durante rebuild: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Hilo 4 — Embedding watcher
+# ---------------------------------------------------------------------------
+
+def run_embedding_thread(
+    cfg:       OrchestratorConfig,
+    shutdown:  threading.Event,
+    do_embed:  callable,
+) -> None:
+    """
+    Sondea la BD cada embed_poll_interval segundos.
+    Llama a do_embed() cuando hay ≥ embed_threshold chunks sin embedding.
+
+    El primer chequeo ocurre inmediatamente al arrancar el hilo para
+    embedir chunks que pudieran haber quedado pendientes en ejecuciones
+    anteriores.
+
+    Parámetros
+    ----------
+    cfg      : configuración del orquestador.
+    shutdown : evento de parada compartido.
+    do_embed : callable sin argumentos que ejecuta el pipeline de embedding.
+               Separado para facilitar tests y mantener este módulo sin estado.
+    """
+    log.info("[embedding] Watcher iniciado (umbral=%d chunks, poll=%ds).",
+             cfg.embed_threshold, int(cfg.embed_poll_interval))
+
+    # Primer intento inmediato al arrancar
+    _try_embed(cfg, do_embed)
+
+    while not shutdown.is_set():
+        shutdown.wait(timeout=cfg.embed_poll_interval)
+        if shutdown.is_set():
+            break
+        _try_embed(cfg, do_embed)
+
+    log.info("[embedding] Watcher detenido.")
+
+
+def _try_embed(cfg: OrchestratorConfig, do_embed: callable) -> None:
+    """
+    Comprueba si hay chunks pendientes de embedding y, si superan el umbral,
+    ejecuta do_embed().
+
+    No lanza excepciones: los errores se loguean y se ignoran para que el
+    hilo no muera ante un fallo puntual.
+    """
+    try:
+        stats = get_chunk_stats(cfg.db_path)
+        pending = stats["pending_chunks"]
+    except Exception as exc:
+        log.warning("[embedding] Error al consultar BD: %s", exc)
+        return
+
+    if pending >= cfg.embed_threshold:
+        log.info("[embedding] %d chunks sin embedding ≥ umbral %d — embediendo…",
+                 pending, cfg.embed_threshold)
+        try:
+            do_embed()
+        except Exception as exc:
+            log.error("[embedding] Error durante embedding: %s", exc, exc_info=True)
+    else:
+        log.debug("[embedding] %d chunks pendientes (umbral=%d) — esperando.",
+                  pending, cfg.embed_threshold)
