@@ -32,6 +32,7 @@ class CrawlerConfig:
     download_interval:  float = 30.0
     pdf_interval:       float = 2.0  # pausa ENTRE PDFs — el rate limit real lo gestiona pdf_extractor
     chunk_size:         int   = 1000
+    overlap_sentences:  int   = 2     # oraciones de contexto compartidas entre chunks
     ids_csv:            Path  = field(default_factory=lambda: IDS_CSV)
     documents_csv:      Path  = field(default_factory=lambda: DOCUMENTS_CSV)
     discovery_start:    int   = 0
@@ -69,8 +70,11 @@ class Crawler:
         # Importación lazy para no forzar SQLite en tests que no lo usan
         from ..database.schema import init_db, DB_PATH
         from ..database import crawler_repository as repo
+        from ..database.chunk_repository import save_chunks, get_chunks
         init_db(DB_PATH)
-        self._repo    = repo
+        self._repo        = repo
+        self._save_chunks = save_chunks
+        self._get_chunks  = get_chunks
         self._db_path = DB_PATH
 
         self._stop = threading.Event()
@@ -246,7 +250,8 @@ class Crawler:
                         # Paso 1: descarga y extracción
                         logger.info("[PDF] [%d/%d] Descargando PDF …", i, len(pending_ids))
                         full_text, chunks = download_and_extract(
-                            arxiv_id, pdf_url=pdf_url, chunk_size=cfg.chunk_size
+                            arxiv_id, pdf_url=pdf_url, chunk_size=cfg.chunk_size,
+                            overlap_sentences=cfg.overlap_sentences
                         )
                         logger.info(
                             "[PDF] [%d/%d] PDF descargado y parseado — "
@@ -260,7 +265,7 @@ class Crawler:
 
                         # Paso 3: guardar chunks en SQLite
                         logger.info("[PDF] [%d/%d] Guardando %d chunks en SQLite …", i, len(pending_ids), len(chunks))
-                        self._repo.save_chunks(arxiv_id, chunks, db_path=self._db_path)
+                        self._save_chunks(arxiv_id, chunks, db_path=self._db_path)
 
                         # Confirmación final
                         stats = self._repo.get_stats(db_path=self._db_path)
