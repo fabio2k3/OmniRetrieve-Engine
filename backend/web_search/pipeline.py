@@ -22,7 +22,7 @@ Uso programático
 ----------------
     from backend.web_search.pipeline import WebSearchPipeline
 
-    pipeline = WebSearchPipeline(api_key="tvly-...")
+    pipeline = WebSearchPipeline()  # lee TAVILY_API_KEY del .env
     results  = pipeline.run(
         query="fairness in machine learning",
         retriever_results=lsi_results,
@@ -30,7 +30,8 @@ Uso programático
 
 Uso CLI
 -------
-    python -m backend.web_search.pipeline --query "fairness in ML" --top 5
+    python -m backend.web_search.pipeline --query "fairness in ML"
+    python -m backend.web_search.pipeline --query "fairness in ML" --api-key tvly-...
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ class WebSearchPipeline:
 
     Parámetros
     ----------
-    api_key      : clave de API de Tavily (tvly-...)
+    api_key      : clave de API de Tavily. Si no se pasa, se lee del .env.
     threshold    : score mínimo para considerar un doc relevante (default: 0.15)
     min_docs     : docs mínimos que deben superar el threshold (default: 1)
     max_results  : máximo de resultados a pedir a Tavily (default: 5)
@@ -69,23 +70,23 @@ class WebSearchPipeline:
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None = None,
         threshold: float = 0.15,
         min_docs: int = 1,
         max_results: int = 5,
         search_depth: str = "basic",
         db_path: Path = DB_PATH,
     ) -> None:
-        self.searcher   = WebSearcher(
+        self.searcher = WebSearcher(
             api_key=api_key,
             max_results=max_results,
             search_depth=search_depth,
         )
-        self.checker    = SufficiencyChecker(
+        self.checker  = SufficiencyChecker(
             threshold=threshold,
             min_docs=min_docs,
         )
-        self.db_path    = db_path
+        self.db_path  = db_path
 
     def run(
         self,
@@ -138,7 +139,7 @@ class WebSearchPipeline:
         web_normalized = [
             {
                 "score":    r["score"],
-                "arxiv_id": "",           # no tienen arxiv_id
+                "arxiv_id": "",
                 "title":    r["title"],
                 "authors":  "Web Search",
                 "abstract": r["content"][:300],
@@ -148,11 +149,11 @@ class WebSearchPipeline:
             for r in web_results
         ]
 
-        # Marcar fuente en resultados del retriever
+        # Marcar fuente en resultados locales
         for r in retriever_results:
             r.setdefault("source", "local")
 
-        # Combinar: primero los locales, luego los web
+        # Combinar: primero locales, luego web
         combined = retriever_results + web_normalized
 
         log.info(
@@ -176,21 +177,35 @@ def _parse_args() -> argparse.Namespace:
         description="OmniRetrieve — Módulo de Búsqueda Web",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--query",       type=str,   required=True,
-                        help="Consulta de búsqueda.")
-    parser.add_argument("--api-key",     type=str,   required=True,
-                        help="API key de Tavily (tvly-...).")
-    parser.add_argument("--threshold",   type=float, default=0.15,
-                        help="Score mínimo para considerar un doc relevante.")
-    parser.add_argument("--min-docs",    type=int,   default=1,
-                        help="Docs mínimos que deben superar el threshold.")
-    parser.add_argument("--top",         type=int,   default=5,
-                        help="Máximo de resultados web a obtener.")
-    parser.add_argument("--depth",       type=str,   default="basic",
-                        choices=["basic", "advanced"],
-                        help="Profundidad de búsqueda Tavily.")
-    parser.add_argument("--db",          type=Path,  default=DB_PATH,
-                        help="Ruta a la base de datos SQLite.")
+    parser.add_argument(
+        "--query", type=str, required=True,
+        help="Consulta de búsqueda.",
+    )
+    parser.add_argument(
+        "--api-key", type=str, default=None,
+        help="API key de Tavily. Si no se pasa, se lee del archivo .env.",
+    )
+    parser.add_argument(
+        "--threshold", type=float, default=0.15,
+        help="Score mínimo para considerar un doc relevante.",
+    )
+    parser.add_argument(
+        "--min-docs", type=int, default=1,
+        help="Docs mínimos que deben superar el threshold.",
+    )
+    parser.add_argument(
+        "--top", type=int, default=5,
+        help="Máximo de resultados web a obtener.",
+    )
+    parser.add_argument(
+        "--depth", type=str, default="basic",
+        choices=["basic", "advanced"],
+        help="Profundidad de búsqueda Tavily.",
+    )
+    parser.add_argument(
+        "--db", type=Path, default=DB_PATH,
+        help="Ruta a la base de datos SQLite.",
+    )
     return parser.parse_args()
 
 
@@ -198,7 +213,7 @@ def main() -> None:
     args = _parse_args()
 
     pipeline = WebSearchPipeline(
-        api_key=args.api_key,
+        api_key=args.api_key,   # None → lo lee del .env automáticamente
         threshold=args.threshold,
         min_docs=args.min_docs,
         max_results=args.top,
@@ -206,25 +221,24 @@ def main() -> None:
         db_path=args.db,
     )
 
-    # En modo CLI simulamos que no hay resultados del retriever
-    # para forzar la búsqueda web y poder probarla
+    # En CLI simulamos sin resultados del retriever para probar la búsqueda web
     output = pipeline.run(
         query=args.query,
         retriever_results=[],
     )
 
     print(f"\n{'='*60}")
-    print(f"Query: {output['query']}")
-    print(f"Búsqueda web activada: {output['web_activated']}")
-    print(f"Razón: {output['reason']}")
-    print(f"Total resultados: {len(output['results'])}")
+    print(f"Query         : {output['query']}")
+    print(f"Web activada  : {output['web_activated']}")
+    print(f"Razón         : {output['reason']}")
+    print(f"Total results : {len(output['results'])}")
     print(f"{'='*60}")
     for i, r in enumerate(output["results"], 1):
         print(f"\n[{i}] {r['title']}")
-        print(f"    Score : {r['score']:.4f}")
-        print(f"    Fuente: {r.get('source', 'local')}")
-        print(f"    URL   : {r.get('url', r.get('arxiv_id', ''))}")
-        print(f"    Texto : {r.get('abstract', '')[:150]}…")
+        print(f"    Score  : {r['score']:.4f}")
+        print(f"    Fuente : {r.get('source', 'local')}")
+        print(f"    URL    : {r.get('url', r.get('arxiv_id', ''))}")
+        print(f"    Texto  : {r.get('abstract', '')[:150]}…")
 
 
 if __name__ == "__main__":
