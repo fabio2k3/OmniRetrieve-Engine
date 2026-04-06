@@ -1,14 +1,14 @@
 """
 searcher.py
 ===========
-Cliente de búsqueda web usando la API de Tavily.
+Cliente de búsqueda web usando la API de Tavily con DuckDuckGo como fallback.
 
-Responsabilidad única: recibir una query, llamar a Tavily
-y devolver una lista de resultados normalizados.
+Responsabilidad única: recibir una query, intentar buscar con Tavily,
+y si falla usar DuckDuckGo automáticamente como respaldo.
 
 Instalación
 -----------
-    pip install tavily-python python-dotenv
+    pip install tavily-python python-dotenv duckduckgo-search
 
 Configuración
 -------------
@@ -19,8 +19,9 @@ Uso
 ---
     from backend.web_search.searcher import WebSearcher
 
-    searcher = WebSearcher()  # lee la key del .env automáticamente
-    results  = searcher.search("transformer attention mechanisms", max_results=5)
+    searcher = WebSearcher()   # lee la key del .env automáticamente
+    results  = searcher.search("transformer attention mechanisms")
+    # Si Tavily falla → usa DuckDuckGo automáticamente
 """
 
 from __future__ import annotations
@@ -29,12 +30,14 @@ import logging
 import os
 from typing import Any
 
+from backend.web_search.fallback_searcher import DuckDuckGoSearcher
+
 log = logging.getLogger(__name__)
 
 
 class WebSearcher:
     """
-    Wrapper sobre la API de Tavily para búsqueda web.
+    Wrapper sobre la API de Tavily con DuckDuckGo como fallback automático.
 
     Parámetros
     ----------
@@ -42,6 +45,7 @@ class WebSearcher:
                    Si no se pasa, se lee de TAVILY_API_KEY en el archivo .env.
     max_results  : número máximo de resultados por búsqueda (default: 5)
     search_depth : "basic" (más rápido) | "advanced" (más preciso, más créditos)
+    use_fallback : si True, usa DuckDuckGo cuando Tavily falla (default: True)
     """
 
     def __init__(
@@ -49,6 +53,7 @@ class WebSearcher:
         api_key: str | None = None,
         max_results: int = 5,
         search_depth: str = "basic",
+        use_fallback: bool = True,
     ) -> None:
         if api_key is None:
             try:
@@ -66,7 +71,9 @@ class WebSearcher:
         self.api_key      = api_key
         self.max_results  = max_results
         self.search_depth = search_depth
+        self.use_fallback = use_fallback
         self._client      = None
+        self._fallback    = DuckDuckGoSearcher(max_results=max_results)
 
     def _get_client(self):
         """Inicializa el cliente Tavily de forma lazy."""
@@ -83,7 +90,7 @@ class WebSearcher:
 
     def search(self, query: str, max_results: int | None = None) -> list[dict[str, Any]]:
         """
-        Busca en la web usando Tavily y devuelve resultados normalizados.
+        Busca en la web. Intenta Tavily primero y si falla usa DuckDuckGo.
 
         Parámetros
         ----------
@@ -93,7 +100,7 @@ class WebSearcher:
         Devuelve
         --------
         Lista de dicts con keys: title, url, content, score, source.
-        Lista vacía si la búsqueda falla.
+        Lista vacía solo si ambos buscadores fallan.
         """
         n      = max_results or self.max_results
         client = self._get_client()
@@ -108,11 +115,17 @@ class WebSearcher:
                 include_raw_content=False,
             )
             results = self._normalize(response.get("results", []))
-            log.info("[WebSearcher] %d resultados obtenidos.", len(results))
+            log.info("[WebSearcher] %d resultados obtenidos de Tavily.", len(results))
             return results
 
         except Exception as exc:
-            log.error("[WebSearcher] Error en búsqueda Tavily: %s", exc)
+            log.warning(
+                "[WebSearcher] Tavily falló (%s). %s",
+                exc,
+                "Activando fallback DuckDuckGo…" if self.use_fallback else "Sin fallback.",
+            )
+            if self.use_fallback:
+                return self._fallback.search(query, max_results=n)
             return []
 
     def _normalize(self, raw_results: list[dict]) -> list[dict[str, Any]]:
