@@ -25,6 +25,11 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+try:
+    from duckduckgo_search import DDGS
+except ImportError:
+    DDGS = None
+
 
 class DuckDuckGoSearcher:
     """
@@ -66,9 +71,7 @@ class DuckDuckGoSearcher:
         """
         n = max_results or self.max_results
 
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
+        if DDGS is None:
             log.error(
                 "[DuckDuckGo] duckduckgo-search no está instalado. "
                 "Instálalo con: pip install duckduckgo-search"
@@ -86,14 +89,13 @@ class DuckDuckGoSearcher:
                     max_results=n,
                 ):
                     results.append({
-                        "title":   r.get("title", "Sin título"),
-                        "url":     r.get("href", ""),
+                        "title": r.get("title", "Sin título"),
+                        "url": r.get("href", ""),
                         "content": r.get("body", ""),
-                        "score":   0.5,   # DuckDuckGo no devuelve score — valor neutro
-                        "source":  "web_fallback",
+                        "score": 0.5,
+                        "source": "web_fallback",
                     })
 
-            log.info("[DuckDuckGo] %d resultados obtenidos (fallback).", len(results))
             return results
 
         except Exception as exc:
