@@ -114,6 +114,16 @@ CREATE TABLE IF NOT EXISTS lsi_log (
     notes         TEXT
 );
 
+-- ── Módulo de búsqueda web ─────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS web_search_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    searched_at    TEXT    NOT NULL,
+    query          TEXT    NOT NULL,
+    results_found  INTEGER DEFAULT 0,
+    results_saved  INTEGER DEFAULT 0
+);
+
 -- ── Índices ─────────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_doc_categories  ON documents(categories);
