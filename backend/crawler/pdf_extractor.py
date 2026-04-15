@@ -33,6 +33,7 @@ ARXIV_PDF_URL  = "https://arxiv.org/pdf/{arxiv_id}"
 
 MIN_REQUEST_DELAY = 3.0   # arXiv pide >= 3s entre requests
 MIN_CHUNK_CHARS   = 100
+MIN_SENT_CHARS    = 20   # oraciones < esto se fusionan con la siguiente
 
 _last_request: float = 0.0
 
@@ -293,37 +294,109 @@ def _clean_text(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Chunking
 # ---------------------------------------------------------------------------
-def _split_into_chunks(text: str, max_chars: int = 1000) -> List[str]:
+
+# Separa en oraciones respetando texto científico:
+#   - Punto seguido de mayúscula o dígito (evita "Fig. 3", "et al.")
+#   - !? siempre separan
+#   - ; como frontera blanda
+_SENT_RE = re.compile(
+    r'(?<=[.!?])\s+(?=[A-Z\"\'\(0-9])'
+    r'|(?<=;)\s+'
+)
+
+
+def _split_sentences(text: str) -> List[str]:
+    """
+    Divide un bloque de texto en oraciones usando fronteras lingüísticas.
+
+    Fusiona oraciones muy cortas (< MIN_SENT_CHARS) con la siguiente
+    para evitar chunks de una sola palabra o abreviatura suelta.
+    """
+    raw = [s.strip() for s in _SENT_RE.split(text) if s.strip()]
+    merged: List[str] = []
+    buf = ""
+    for sent in raw:
+        buf = (buf + " " + sent).strip() if buf else sent
+        if len(buf) >= MIN_SENT_CHARS:
+            merged.append(buf)
+            buf = ""
+    if buf:
+        if merged:
+            merged[-1] = (merged[-1] + " " + buf).strip()
+        else:
+            merged.append(buf)
+    return merged
+
+
+def _split_into_chunks(
+    text: str,
+    max_chars: int = 1000,
+    overlap_sentences: int = 2,
+) -> List[str]:
+    """
+    Divide el texto en chunks con solapamiento semántico a nivel de oración.
+
+    Algoritmo
+    ---------
+    1. Divide por parrafos (\\n\\n) — fronteras duras entre chunks.
+    2. Dentro de cada parrafo extrae oraciones con _split_sentences().
+    3. Acumula oraciones hasta alcanzar max_chars.
+    4. Al emitir un chunk, las ultimas `overlap_sentences` oraciones se
+       reutilizan como prefijo del siguiente, dando contexto de transicion.
+
+    Parametros
+    ----------
+    text               : texto completo del documento.
+    max_chars          : tamano maximo de cada chunk en caracteres.
+    overlap_sentences  : oraciones compartidas entre chunks consecutivos
+                         dentro del mismo parrafo. 0 = sin solapamiento.
+
+    Ejemplo con overlap_sentences=2
+    --------------------------------
+    Oraciones: [A B C D E F G H]
+    Chunk 1 -> A B C D
+    Chunk 2 -> C D E F     <- C y D repetidas como contexto
+    Chunk 3 -> E F G H     <- E y F repetidas como contexto
+    """
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: List[str] = []
-    current = ""
 
     for para in paragraphs:
-        if len(current) + len(para) + 2 <= max_chars:
-            current = f"{current}\n\n{para}".strip()
-        else:
-            if len(current) >= MIN_CHUNK_CHARS:
-                chunks.append(current)
-            if len(para) > max_chars:
-                sentences = re.split(r"(?<=[.!?])\s+", para)
-                buf = ""
-                for sent in sentences:
-                    if len(buf) + len(sent) + 1 <= max_chars:
-                        buf = f"{buf} {sent}".strip()
-                    else:
-                        if len(buf) >= MIN_CHUNK_CHARS:
-                            chunks.append(buf)
-                        buf = sent
-                if len(buf) >= MIN_CHUNK_CHARS:
-                    chunks.append(buf)
-                current = ""
-            else:
-                current = para
+        sentences = _split_sentences(para)
+        if not sentences:
+            continue
 
-    if len(current) >= MIN_CHUNK_CHARS:
-        chunks.append(current)
+        window: List[str] = []
+        window_len: int   = 0
+
+        for sent in sentences:
+            sent_len = len(sent) + 1  # +1 por el espacio de union
+
+            if window and window_len + sent_len > max_chars:
+                # Emitir chunk actual
+                candidate = " ".join(window)
+                if len(candidate) >= MIN_CHUNK_CHARS:
+                    chunks.append(candidate)
+
+                # Solapamiento: conservar las ultimas N oraciones
+                if overlap_sentences > 0 and len(window) > overlap_sentences:
+                    window     = window[-overlap_sentences:]
+                    window_len = sum(len(s) + 1 for s in window)
+                else:
+                    window     = []
+                    window_len = 0
+
+            window.append(sent)
+            window_len += sent_len
+
+        # Emitir el ultimo chunk del parrafo
+        if window:
+            candidate = " ".join(window)
+            if len(candidate) >= MIN_CHUNK_CHARS:
+                chunks.append(candidate)
 
     return chunks
+
 
 
 # ---------------------------------------------------------------------------
@@ -333,15 +406,24 @@ def download_and_extract(
     arxiv_id: str,
     pdf_url: Optional[str] = None,
     chunk_size: int = 1000,
+    overlap_sentences: int = 2,
 ) -> Tuple[str, List[str]]:
     """
     Descarga el contenido de un artículo arXiv y extrae su texto.
 
     Intenta primero HTML (ligero), luego PDF (pesado) como fallback.
 
+    Parametros
+    ----------
+    arxiv_id          : identificador del articulo.
+    pdf_url           : URL directa al PDF (opcional).
+    chunk_size        : tamano maximo de cada chunk en caracteres.
+    overlap_sentences : oraciones compartidas entre chunks consecutivos.
+                        0 = sin solapamiento. Recomendado: 2-3.
+
     Returns
     -------
-    full_text : texto completo extraído
+    full_text : texto completo extraido
     chunks    : fragmentos listos para embeddings
     """
     # ── Método 1: HTML ───────────────────────────────────────────────────────
@@ -358,7 +440,7 @@ def download_and_extract(
         if len(full_text) < 500:
             raise ValueError(f"Texto HTML demasiado corto ({len(full_text)} chars)")
 
-        chunks = _split_into_chunks(full_text, max_chars=chunk_size)
+        chunks = _split_into_chunks(full_text, max_chars=chunk_size, overlap_sentences=overlap_sentences)
         logger.info(
             "[Extractor] ✅ HTML extraído — %.1f KB descargados → "
             "%d chars texto, %d chunks",

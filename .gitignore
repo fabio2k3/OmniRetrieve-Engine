@@ -69,35 +69,5 @@ out/
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-# ── Environment variables ─────────────────────────────────────────────────────
-.env
-.env.*
-!.env.example
-
-# ── Python ────────────────────────────────────────────────────────────────────
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-.eggs/
-
-# ── Virtual environments ──────────────────────────────────────────────────────
-.venv/
-venv/
-env/
-
-# ── Crawler data (generado automáticamente) ───────────────────────────────────
-# backend/data/ids_article.csv
-# backend/data/documents.csv
-# backend/data/crawler.log
-
-# ── IDEs ──────────────────────────────────────────────────────────────────────
-.vscode/
-.idea/
-*.iml
-
-# ── OS ────────────────────────────────────────────────────────────────────────
-.DS_Store
-Thumbs.db
+data
+__pycache__

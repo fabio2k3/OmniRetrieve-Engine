@@ -176,7 +176,8 @@ def test_arxiv_client(network: bool):
 def test_database(tmp: Path):
     section("5 · SQLite — schema y CRUD completo")
     from backend.database.schema import init_db
-    from backend.database import repository as repo
+    from backend.database import crawler_repository as repo
+    from backend.database.chunk_repository import save_chunks, get_chunks
     db = tmp / "db" / "test.db"
 
     try:
@@ -217,9 +218,9 @@ def test_database(tmp: Path):
 
     try:
         repo.save_pdf_text("2301.00000", "Texto del paper. " * 60, db_path=db)
-        repo.save_chunks("2301.00000", ["chunk A", "chunk B", "chunk C"], db_path=db)
+        save_chunks("2301.00000", ["chunk A", "chunk B", "chunk C"], db_path=db)
         doc = repo.get_document("2301.00000", db_path=db)
-        chunks = repo.get_chunks("2301.00000", db_path=db)
+        chunks = get_chunks("2301.00000", db_path=db)
         assert doc["pdf_downloaded"] == 1
         assert doc["text_length"] > 0
         assert len(chunks) == 3
@@ -288,7 +289,8 @@ def test_pdf_extractor(network: bool):
 def test_database_content(tmp: Path):
     section("5b · SQLite — verificación de contenido guardado")
     from backend.database.schema import init_db, get_connection
-    from backend.database import repository as repo
+    from backend.database import crawler_repository as repo
+    from backend.database.chunk_repository import save_chunks, get_chunks
     db = tmp / "db" / "content.db"
     init_db(db)
 
@@ -307,7 +309,7 @@ def test_database_content(tmp: Path):
         "Reinforcement learning combined with deep networks enables complex decision making.",
     ]
     repo.save_pdf_text("2301.00099", texto, db_path=db)
-    repo.save_chunks("2301.00099", chunks_texto, db_path=db)
+    save_chunks("2301.00099", chunks_texto, db_path=db)
 
     # ── Verificar que el texto se guardó correctamente ──────────────────────
     try:
@@ -377,7 +379,8 @@ def test_integration(tmp: Path, network: bool):
     section("7 · Integración — flujo completo crawler → SQLite")
     from backend.crawler.document import Document
     from backend.database.schema import init_db
-    from backend.database import repository as repo
+    from backend.database import crawler_repository as repo
+    from backend.database.chunk_repository import save_chunks, get_chunks
 
     csv  = tmp / "int_docs.csv"
     db   = tmp / "db" / "int.db"
@@ -408,7 +411,7 @@ def test_integration(tmp: Path, network: bool):
 
     try:
         repo.save_pdf_text("2310.00000", "Contenido PDF. " * 40, db_path=db)
-        repo.save_chunks("2310.00000", [f"chunk {i}" for i in range(4)], db_path=db)
+        save_chunks("2310.00000", [f"chunk {i}" for i in range(4)], db_path=db)
         stats = repo.get_stats(db_path=db)
         assert stats["pdf_indexed"] == 1 and stats["total_chunks"] == 4
         ok(f"PDF guardado en DB → indexed={stats['pdf_indexed']}, chunks={stats['total_chunks']}")

@@ -32,6 +32,7 @@ class CrawlerConfig:
     download_interval:  float = 30.0
     pdf_interval:       float = 2.0  # pausa ENTRE PDFs — el rate limit real lo gestiona pdf_extractor
     chunk_size:         int   = 1000
+    overlap_sentences:  int   = 2     # oraciones de contexto compartidas entre chunks
     ids_csv:            Path  = field(default_factory=lambda: IDS_CSV)
     documents_csv:      Path  = field(default_factory=lambda: DOCUMENTS_CSV)
     discovery_start:    int   = 0
@@ -68,9 +69,12 @@ class Crawler:
 
         # Importación lazy para no forzar SQLite en tests que no lo usan
         from ..database.schema import init_db, DB_PATH
-        from ..database import repository as repo
+        from ..database import crawler_repository as repo
+        from ..database.chunk_repository import save_chunks, get_chunks
         init_db(DB_PATH)
-        self._repo    = repo
+        self._repo        = repo
+        self._save_chunks = save_chunks
+        self._get_chunks  = get_chunks
         self._db_path = DB_PATH
 
         self._stop = threading.Event()
@@ -118,20 +122,17 @@ class Crawler:
                     added = self.id_store.add_ids(ids)
                     logger.info("[Discovery] %d IDs encontrados → %d nuevos. %s",
                                 len(ids), added, self.id_store)
+                    # Siempre avanzar el offset, tanto si encontramos IDs
+                    # nuevos como si la página ya era conocida. Resetear
+                    # a 0 aquí significaría re-escanear páginas que ya
+                    # tenemos en lugar de continuar explorando el índice.
+                    cfg.discovery_start += len(ids)
                     if added == 0:
-                        # Toda la página ya era conocida → hemos llegado al
-                        # límite de lo que ya teníamos. Reseteamos a 0 para
-                        # empezar a buscar papers recién publicados.
                         logger.info(
-                            "[Discovery] Página sin IDs nuevos — reseteando "
-                            "offset a 0 para buscar papers recientes."
+                            "[Discovery] Página ya conocida (offset=%d) — "
+                            "continuando hacia papers más antiguos.",
+                            cfg.discovery_start,
                         )
-                        cfg.discovery_start = 0
-                    else:
-                        cfg.discovery_start += cfg.ids_per_discovery
-                else:
-                    logger.info("[Discovery] Sin resultados, reiniciando offset.")
-                    cfg.discovery_start = 0
             except Exception as exc:
                 logger.error("[Discovery] Error: %s", exc, exc_info=True)
             self._stop.wait(cfg.discovery_interval)
@@ -156,32 +157,43 @@ class Crawler:
                 documents     = self.client.fetch_documents(pending)
                 saved = skipped = 0
 
-                for doc in documents:
-                    # 1. CSV
-                    if doc.arxiv_id not in already_saved:
-                        doc.save(cfg.documents_csv)
-                        already_saved.add(doc.arxiv_id)
-                        saved += 1
-                    else:
-                        skipped += 1
-
-                    # 2. SQLite — upsert siempre (idempotente)
-                    self._repo.upsert_document(
-                        arxiv_id   = doc.arxiv_id,
-                        title      = doc.title,
-                        authors    = doc.authors,
-                        abstract   = doc.abstract,
-                        categories = doc.categories,
-                        published  = doc.published,
-                        updated    = doc.updated,
-                        pdf_url    = doc.pdf_url,
-                        fetched_at = doc.fetched_at,
-                        db_path    = self._db_path,
+                if not documents:
+                    # fetch_documents devolvió [] — error de red silenciado
+                    # en _fetch_chunk. No marcamos como descargados para
+                    # que se reintenten en el siguiente ciclo.
+                    logger.warning(
+                        "[Downloader] fetch_documents devolvió 0 documentos "
+                        "para %d IDs — posible error de red. Reintentando en el "
+                        "próximo ciclo.", len(pending)
                     )
+                else:
+                    for doc in documents:
+                        # 1. CSV
+                        if doc.arxiv_id not in already_saved:
+                            doc.save(cfg.documents_csv)
+                            already_saved.add(doc.arxiv_id)
+                            saved += 1
+                        else:
+                            skipped += 1
 
-                self.id_store.mark_downloaded(pending)
-                logger.info("[Downloader] Guardados %d, omitidos %d duplicados. %s",
-                            saved, skipped, self.id_store)
+                        # 2. SQLite — upsert siempre (idempotente)
+                        self._repo.upsert_document(
+                            arxiv_id   = doc.arxiv_id,
+                            title      = doc.title,
+                            authors    = doc.authors,
+                            abstract   = doc.abstract,
+                            categories = doc.categories,
+                            published  = doc.published,
+                            updated    = doc.updated,
+                            pdf_url    = doc.pdf_url,
+                            fetched_at = doc.fetched_at,
+                            db_path    = self._db_path,
+                        )
+
+                    # Solo marcar como descargados si realmente se procesaron
+                    self.id_store.mark_downloaded(pending)
+                    logger.info("[Downloader] Guardados %d, omitidos %d duplicados. %s",
+                                saved, skipped, self.id_store)
             except Exception as exc:
                 logger.error("[Downloader] Error en batch: %s", exc, exc_info=True)
 
@@ -238,7 +250,8 @@ class Crawler:
                         # Paso 1: descarga y extracción
                         logger.info("[PDF] [%d/%d] Descargando PDF …", i, len(pending_ids))
                         full_text, chunks = download_and_extract(
-                            arxiv_id, pdf_url=pdf_url, chunk_size=cfg.chunk_size
+                            arxiv_id, pdf_url=pdf_url, chunk_size=cfg.chunk_size,
+                            overlap_sentences=cfg.overlap_sentences
                         )
                         logger.info(
                             "[PDF] [%d/%d] PDF descargado y parseado — "
@@ -252,7 +265,7 @@ class Crawler:
 
                         # Paso 3: guardar chunks en SQLite
                         logger.info("[PDF] [%d/%d] Guardando %d chunks en SQLite …", i, len(pending_ids), len(chunks))
-                        self._repo.save_chunks(arxiv_id, chunks, db_path=self._db_path)
+                        self._save_chunks(arxiv_id, chunks, db_path=self._db_path)
 
                         # Confirmación final
                         stats = self._repo.get_stats(db_path=self._db_path)

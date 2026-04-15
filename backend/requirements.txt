@@ -1,5 +1,15 @@
 # SSL certificate verification (needed on Windows)
 certifi>=2024.0.0
 pymupdf>=1.24.0
-# sentence-transformers>=2.7.0
-# chromadb>=0.5.0
+
+#Modulo B: Indexing
+nltk>=3.8.0
+
+# Modulo C: LSI Retrieval
+numpy>=1.24.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
+# Módulo D: Embedding
+sentence-transformers>=2.7.0
+faiss-cpu>=1.7.4          # cambiar a faiss-gpu si hay GPU disponible
