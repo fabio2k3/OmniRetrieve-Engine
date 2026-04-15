@@ -1,13 +1,26 @@
 """
 robots.py
-Verifica robots.txt antes de hacer cualquier request.
+=========
+Verificador de robots.txt con caché TTL, compartido por todos los clientes.
 
-Nota sobre arXiv
-----------------
-arXiv provee explícitamente su API REST (export.arxiv.org/api/) y sus PDFs
-para acceso programático según su API User Manual. Sin embargo, su robots.txt
-puede bloquear ciertos user agents o paths. Para estos dominios oficialmente
-permitidos usamos una allowlist que evita falsos positivos.
+Dominios permitidos
+-------------------
+``ALLOWED_DOMAINS`` contiene dominios cuyo acceso programático está
+explícitamente sancionado por sus ToS o API oficial.  Para estos dominios
+el checker devuelve True directamente sin consultar robots.txt, evitando
+falsos positivos que bloquearían la API.
+
+Los clientes pueden registrar sus propios dominios en el arranque:
+
+    from backend.crawler.robots import checker
+    checker.allow_domain("export.example.com")
+
+o directamente sobre el conjunto de módulo:
+
+    from backend.crawler import robots
+    robots.ALLOWED_DOMAINS.add("export.example.com")
+
+Ambas formas son equivalentes y thread-safe (set.add es atómico en CPython).
 """
 
 from __future__ import annotations
@@ -18,24 +31,25 @@ import time
 import urllib.request
 import urllib.robotparser
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Optional, Set
 
 logger = logging.getLogger(__name__)
 
-USER_AGENT      = "SRI-Crawler/1.0"
+USER_AGENT       = "SRI-Crawler/1.0"
 ROBOTS_CACHE_TTL = 3600  # segundos
 
 # ---------------------------------------------------------------------------
-# Dominios con acceso programático explícitamente permitido por sus ToS/API
+# Dominios con acceso programático explícitamente permitido.
+# Mutable para que los clientes añadan los suyos sin modificar este módulo.
 # ---------------------------------------------------------------------------
-ALLOWED_DOMAINS = {
-    "export.arxiv.org",   # API oficial de arXiv
-    "arxiv.org",          # PDFs y páginas de artículos
+ALLOWED_DOMAINS: Set[str] = {
+    "export.arxiv.org",   # API oficial de arXiv (Atom/REST)
+    "arxiv.org",          # PDFs y páginas de artículos de arXiv
 }
 
 
 # ---------------------------------------------------------------------------
-# SSL context
+# SSL context compartido
 # ---------------------------------------------------------------------------
 def _build_ssl_context() -> ssl.SSLContext:
     try:
@@ -67,14 +81,36 @@ class RobotsChecker:
     """
     Verificador de robots.txt con caché TTL.
 
-    Para dominios en ALLOWED_DOMAINS devuelve True directamente,
+    Para dominios en ``ALLOWED_DOMAINS`` devuelve True directamente,
     ya que su acceso programático está explícitamente sancionado.
     Para el resto respeta robots.txt normalmente.
+
+    Los nuevos clientes deben registrar sus dominios antes de arrancar
+    el Crawler, llamando a ``allow_domain()``.
     """
 
     def __init__(self, ttl: float = ROBOTS_CACHE_TTL) -> None:
         self._ttl   = ttl
         self._cache: dict[str, tuple[urllib.robotparser.RobotFileParser, float]] = {}
+
+    # ── Registro de dominios permitidos ──────────────────────────────────────
+
+    def allow_domain(self, domain: str) -> None:
+        """
+        Registra *domain* como dominio de acceso permitido.
+
+        Equivalente a ``ALLOWED_DOMAINS.add(domain)`` pero más legible
+        desde el código de los clientes.
+
+        Ejemplo en un cliente nuevo::
+
+            from backend.crawler.robots import checker
+            checker.allow_domain("api.semantic_scholar.org")
+        """
+        ALLOWED_DOMAINS.add(domain)
+        logger.debug("[Robots] Dominio registrado como permitido: %s", domain)
+
+    # ── Helpers internos ─────────────────────────────────────────────────────
 
     @staticmethod
     def _origin(url: str) -> tuple[str, str]:
@@ -107,42 +143,46 @@ class RobotsChecker:
         self._cache[origin] = (parser, now)
         return parser
 
-    # ── API pública ──────────────────────────────────────────────────────────
+    # ── API pública ───────────────────────────────────────────────────────────
 
     def allowed(self, url: str) -> bool:
         """
         True si USER_AGENT puede acceder a *url*.
-        Para dominios en ALLOWED_DOMAINS siempre devuelve True.
+
+        Los dominios registrados en ``ALLOWED_DOMAINS`` siempre devuelven True.
         """
         _, host = self._origin(url)
 
-        # Dominios con API pública explícitamente permitida
         if host in ALLOWED_DOMAINS:
             return True
 
         try:
             origin, _ = self._origin(url)
-            parser     = self._get_parser(origin)
-            result     = parser.can_fetch(USER_AGENT, url)
+            parser    = self._get_parser(origin)
+            result    = parser.can_fetch(USER_AGENT, url)
             if not result:
-                logger.info("robots.txt prohíbe: %s", url)
+                logger.info("robots.txt prohibe: %s", url)
             return result
         except Exception as exc:
-            logger.warning("Error comprobando robots.txt para %s: %s — permitiendo.", url, exc)
+            logger.warning(
+                "Error comprobando robots.txt para %s: %s — permitiendo.", url, exc
+            )
             return True  # fail-open
 
     def crawl_delay(self, url: str) -> float:
         """
-        Devuelve el Crawl-delay indicado en robots.txt (0.0 si no está definido).
-        Para dominios en ALLOWED_DOMAINS devuelve 0.0 (respetamos nuestro propio delay).
+        Devuelve el Crawl-delay de robots.txt (0.0 si no está definido).
+
+        Para dominios en ``ALLOWED_DOMAINS`` devuelve 0.0 — el delay
+        efectivo lo gestiona cada cliente con su propio ``request_delay``.
         """
         _, host = self._origin(url)
         if host in ALLOWED_DOMAINS:
             return 0.0
         try:
             origin, _ = self._origin(url)
-            parser     = self._get_parser(origin)
-            delay      = parser.crawl_delay(USER_AGENT)
+            parser    = self._get_parser(origin)
+            delay     = parser.crawl_delay(USER_AGENT)
             return float(delay) if delay is not None else 0.0
         except Exception:
             return 0.0

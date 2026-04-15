@@ -22,6 +22,7 @@ from html.parser import HTMLParser
 from typing import List, Optional, Tuple
 
 from .robots import checker as _robots, USER_AGENT, _SSL_CTX
+from .chunker import make_chunks as _make_chunks, clean_text as _clean_text_fn
 
 logger = logging.getLogger(__name__)
 
@@ -285,117 +286,23 @@ def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
 # Limpieza de texto
 # ---------------------------------------------------------------------------
 def _clean_text(text: str) -> str:
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"^\s*\d+\s*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
+    """Delega en chunker.clean_text (fuente de verdad única)."""
+    return _clean_text_fn(text)
 
 
 # ---------------------------------------------------------------------------
 # Chunking
 # ---------------------------------------------------------------------------
+# Chunking — delegado a chunker.py (fuente de verdad única del algoritmo)
+# ---------------------------------------------------------------------------
+# Las funciones _split_sentences y _split_into_chunks se mantienen como
+# stubs para que cualquier import existente desde tests u otras herramientas
+# siga funcionando sin cambios.
 
-# Separa en oraciones respetando texto científico:
-#   - Punto seguido de mayúscula o dígito (evita "Fig. 3", "et al.")
-#   - !? siempre separan
-#   - ; como frontera blanda
-_SENT_RE = re.compile(
-    r'(?<=[.!?])\s+(?=[A-Z\"\'\(0-9])'
-    r'|(?<=;)\s+'
+from .chunker import (           # noqa: E402  (import dentro del módulo)
+    _split_sentences,
+    _split_into_chunks,
 )
-
-
-def _split_sentences(text: str) -> List[str]:
-    """
-    Divide un bloque de texto en oraciones usando fronteras lingüísticas.
-
-    Fusiona oraciones muy cortas (< MIN_SENT_CHARS) con la siguiente
-    para evitar chunks de una sola palabra o abreviatura suelta.
-    """
-    raw = [s.strip() for s in _SENT_RE.split(text) if s.strip()]
-    merged: List[str] = []
-    buf = ""
-    for sent in raw:
-        buf = (buf + " " + sent).strip() if buf else sent
-        if len(buf) >= MIN_SENT_CHARS:
-            merged.append(buf)
-            buf = ""
-    if buf:
-        if merged:
-            merged[-1] = (merged[-1] + " " + buf).strip()
-        else:
-            merged.append(buf)
-    return merged
-
-
-def _split_into_chunks(
-    text: str,
-    max_chars: int = 1000,
-    overlap_sentences: int = 2,
-) -> List[str]:
-    """
-    Divide el texto en chunks con solapamiento semántico a nivel de oración.
-
-    Algoritmo
-    ---------
-    1. Divide por parrafos (\\n\\n) — fronteras duras entre chunks.
-    2. Dentro de cada parrafo extrae oraciones con _split_sentences().
-    3. Acumula oraciones hasta alcanzar max_chars.
-    4. Al emitir un chunk, las ultimas `overlap_sentences` oraciones se
-       reutilizan como prefijo del siguiente, dando contexto de transicion.
-
-    Parametros
-    ----------
-    text               : texto completo del documento.
-    max_chars          : tamano maximo de cada chunk en caracteres.
-    overlap_sentences  : oraciones compartidas entre chunks consecutivos
-                         dentro del mismo parrafo. 0 = sin solapamiento.
-
-    Ejemplo con overlap_sentences=2
-    --------------------------------
-    Oraciones: [A B C D E F G H]
-    Chunk 1 -> A B C D
-    Chunk 2 -> C D E F     <- C y D repetidas como contexto
-    Chunk 3 -> E F G H     <- E y F repetidas como contexto
-    """
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks: List[str] = []
-
-    for para in paragraphs:
-        sentences = _split_sentences(para)
-        if not sentences:
-            continue
-
-        window: List[str] = []
-        window_len: int   = 0
-
-        for sent in sentences:
-            sent_len = len(sent) + 1  # +1 por el espacio de union
-
-            if window and window_len + sent_len > max_chars:
-                # Emitir chunk actual
-                candidate = " ".join(window)
-                if len(candidate) >= MIN_CHUNK_CHARS:
-                    chunks.append(candidate)
-
-                # Solapamiento: conservar las ultimas N oraciones
-                if overlap_sentences > 0 and len(window) > overlap_sentences:
-                    window     = window[-overlap_sentences:]
-                    window_len = sum(len(s) + 1 for s in window)
-                else:
-                    window     = []
-                    window_len = 0
-
-            window.append(sent)
-            window_len += sent_len
-
-        # Emitir el ultimo chunk del parrafo
-        if window:
-            candidate = " ".join(window)
-            if len(candidate) >= MIN_CHUNK_CHARS:
-                chunks.append(candidate)
-
-    return chunks
 
 
 
@@ -440,7 +347,7 @@ def download_and_extract(
         if len(full_text) < 500:
             raise ValueError(f"Texto HTML demasiado corto ({len(full_text)} chars)")
 
-        chunks = _split_into_chunks(full_text, max_chars=chunk_size, overlap_sentences=overlap_sentences)
+        chunks = _make_chunks(full_text, chunk_size=chunk_size, overlap_sentences=overlap_sentences)
         logger.info(
             "[Extractor] ✅ HTML extraído — %.1f KB descargados → "
             "%d chars texto, %d chunks",
@@ -460,7 +367,8 @@ def download_and_extract(
     try:
         pdf_bytes = _get(url, timeout=15, accept="application/pdf")
         full_text = _extract_text_from_pdf(pdf_bytes)
-        chunks    = _split_into_chunks(full_text, max_chars=chunk_size)
+        chunks    = _make_chunks(full_text, chunk_size=chunk_size,
+                                 overlap_sentences=overlap_sentences)
         logger.info(
             "[Extractor] ✅ PDF extraído — %.1f KB descargados → "
             "%d chars texto, %d chunks",
