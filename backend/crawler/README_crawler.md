@@ -1,220 +1,316 @@
----
-noteId: "5c4d1fb0296511f1b0a22758fc0c48d3"
-tags: []
+# Módulo `crawler` — Adquisición de Datos
+
+Crawler multi-fuente que descubre artículos, descarga metadatos y extrae texto
+completo, almacenando todo en SQLite para su posterior indexación y vectorización.
 
 ---
 
-# OmniRetrieve — Módulo de Adquisición de Datos
-
-Crawler que descubre artículos de IA/ML en arXiv, descarga sus metadatos y extrae el texto completo, almacenándolo en SQLite para su posterior indexación y vectorización.
-
----
-
-## Estructura de archivos
+## Estructura del módulo
 
 ```
-backend/
-├── main.py                    <- entrypoint principal
-├── crawler/
-│   ├── arxiv_client.py        <- cliente API Atom de arXiv
-│   ├── crawler.py             <- orquestador (3 hilos daemon)
-│   ├── document.py            <- dataclass Document + CSV
-│   ├── id_store.py            <- gestión thread-safe de IDs
-│   ├── pdf_extractor.py       <- extracción de texto + chunking
-│   └── robots.py              <- respeto a robots.txt
-├── database/
-│   ├── schema.py              <- definición de tablas SQLite
-│   ├── crawler_repository.py  <- operaciones CRUD de documentos
-│   └── chunk_repository.py    <- operaciones CRUD de chunks
-└── tools/
-    ├── inspect_db.py          <- inspector visual de la BD
-    ├── rebuild_chunks.py      <- reconstruye todos los chunks con el nuevo algoritmo
-    └── embed_chunks.py        <- embediza todos los chunks pendientes
+crawler/
+├── clients/
+│   ├── base_client.py       ← contrato que todo cliente debe implementar
+│   ├── arxiv_client.py      ← cliente arXiv: política + descarga + extracción
+│   └── __init__.py
+├── arxiv_client.py          ← re-exporta ArxivClient (compatibilidad)
+├── chunker.py               ← algoritmo de chunking genérico
+├── crawler.py               ← orquestador (3 hilos daemon)
+├── document.py              ← dataclass Document + persistencia CSV
+├── id_store.py              ← store thread-safe de IDs compuestos
+└── robots.py                ← verificador de robots.txt genérico
 ```
 
 ---
 
-## Instalación
+## Diseño: separación de responsabilidades
 
-```bash
-pip install certifi pymupdf
+El módulo distingue tres capas independientes que no se mezclan entre sí:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  POLÍTICA DE CRAWLING          cada cliente la declara           │
+│    request_delay, trusted_domains                                │
+│    ArxivClient: delay=15s, trusted={arxiv.org, export...}       │
+├─────────────────────────────────────────────────────────────────┤
+│  TRANSPORTE Y EXTRACCIÓN       cada cliente la implementa        │
+│    download_text(local_id)                                       │
+│    ArxivClient: HTML (LaTeXML) → PDF (PyMuPDF) fallback          │
+├─────────────────────────────────────────────────────────────────┤
+│  FRAGMENTACIÓN (CHUNKING)      genérica, sin saber de fuente     │
+│    chunker.make_chunks(text, chunk_size, overlap_sentences)      │
+│    compartida por todos los clientes                             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-| Paquete | Para qué |
-|---|---|
-| `certifi` | Certificados SSL en Windows |
-| `pymupdf` | Extraer texto de PDFs (fallback) |
+El `Crawler` une estas tres capas: llama a `client.download_text()` para obtener el
+texto y luego a `chunker.make_chunks()` para fragmentarlo.
+Ninguna de las dos capas conoce a la otra.
 
 ---
 
-## Cómo ejecutar
+## Formato de IDs
 
-```bash
-# Desde la carpeta raíz que contiene backend/
-python -m backend.main
+Todos los IDs del sistema usan formato compuesto:
+
+```
+{fuente}:{id_local}
 ```
 
-### Parámetros disponibles
+Ejemplos: `arxiv:2301.12345`, `semantic_scholar:abc123`
 
-```bash
-python -m backend.main \
-  --batch-size 10          \
-  --pdf-batch 10           \
-  --ids-per-discovery 100  \
-  --discovery-interval 120 \
-  --download-interval 30   \
-  --pdf-interval 2         \
-  --chunk-size 1000        \
-  --overlap 2
-```
-
-| Parámetro | Default | Descripción |
-|---|---|---|
-| `--batch-size` | 10 | Metadatos a descargar por ciclo |
-| `--pdf-batch` | 10 | Textos a extraer por ciclo |
-| `--ids-per-discovery` | 100 | IDs a buscar por ciclo |
-| `--discovery-interval` | 120 | Segundos entre ciclos de discovery |
-| `--download-interval` | 30 | Segundos entre ciclos de metadatos |
-| `--pdf-interval` | 2 | Segundos entre extracciones individuales |
-| `--chunk-size` | 1000 | Tamaño máximo de cada chunk en caracteres |
-| `--overlap` | 2 | Oraciones de solapamiento entre chunks consecutivos |
+Este ID se almacena en el campo `arxiv_id` de SQLite y en `doc_id` del CSV.
+El resto del sistema (indexing, embedding, retrieval) lo trata como un string
+opaco sin saber de qué fuente proviene.
 
 ---
 
-## Arquitectura: los 3 hilos
+## Cómo funciona el Crawler
 
-El crawler ejecuta tres tareas en paralelo como hilos daemon:
-
-```
-+-------------------------------------------------------------+
-|                        Crawler                              |
-|                                                             |
-|  Hilo 1: Discovery          Hilo 2: Download               |
-|  -----------------          -----------------              |
-|  Busca IDs nuevos en   ->   Descarga metadatos         ->  |
-|  arXiv cada 120s            de IDs pendientes              |
-|  Guarda en                  Guarda en CSV + SQLite         |
-|  ids_article.csv                                           |
-|                                  |                          |
-|                        Hilo 3: PDF/HTML                     |
-|                        ----------------                     |
-|                        Extrae texto completo               |
-|                        (HTML primero, PDF fallback)        |
-|                        Aplica chunking con overlap          |
-|                        Guarda texto + chunks en SQLite     |
-+-------------------------------------------------------------+
-```
-
-### Hilo 1 — Discovery (`_discovery_loop`)
-
-- Consulta la API Atom de arXiv buscando papers en categorías de IA/ML: `cs.AI, cs.LG, cs.CV, cs.CL, cs.NE, stat.ML`
-- Ordena por fecha de publicación descendente (papers más recientes primero)
-- Guarda los IDs nuevos en `ids_article.csv` via `IdStore`
-- Cuando una página no devuelve IDs nuevos, resetea el offset a 0 para buscar papers recién publicados
-
-### Hilo 2 — Downloader (`_download_loop`)
-
-- Lee lotes de IDs pendientes de `IdStore`
-- Descarga metadatos completos via la API de arXiv (título, autores, abstract, categorías, fechas, URL del PDF)
-- Persiste en CSV (`documents.csv`) y en SQLite (`documents`) con upsert idempotente
-- Marca los IDs como descargados en `ids_article.csv`
-
-### Hilo 3 — PDF/HTML (`_pdf_loop`)
-
-- Consulta SQLite para obtener documentos con `pdf_downloaded = 0` (pendientes)
-- Para cada uno intenta dos métodos en orden:
-  1. **HTML** — `arxiv.org/html/{id}` (~100–500 KB, sin dependencias extra)
-  2. **PDF** — `arxiv.org/pdf/{id}` (~2–15 MB, requiere pymupdf)
-- Aplica el algoritmo de chunking con solapamiento semántico
-- Guarda el texto limpio y los chunks en SQLite via `chunk_repository`
-
----
-
-## Extracción de texto
-
-### Método 1: HTML (preferido)
-
-arXiv genera HTML para casi todos los papers usando **LaTeXML**, que produce una estructura fija con clases CSS `ltx_*`:
+Ejecuta tres hilos daemon que se coordinan a través de SQLite e `IdStore`:
 
 ```
-ltx_document
-  +-- ltx_title          -> titulo del paper             [incluido]
-  +-- ltx_authors        -> autores/afiliaciones         [skip]
-  +-- ltx_abstract       -> abstract                     [incluido]
-  +-- ltx_section        -> Introduction, Method...      [incluido]
-  |     +-- ltx_title_section  -> heading de seccion     [incluido]
-  |     +-- ltx_para / ltx_p  -> parrafos                [incluido]
-  +-- ltx_figure         -> figuras                      [skip]
-  +-- ltx_table          -> tablas                       [skip]
-  +-- ltx_equation       -> ecuaciones LaTeX             [skip]
-  +-- ltx_bibliography   -> referencias                  [skip]
+  cliente A ──┐
+  cliente B ──┤──► Crawler
+  cliente N ──┘
+               │
+     ┌─────────┴──────────┬──────────────────┐
+     │                    │                  │
+  Hilo 1              Hilo 2             Hilo 3
+  Discovery          Downloader           Text
+     │                    │                  │
+  fetch_ids()        fetch_docs()      download_text()
+     │                    │                  │
+  IdStore  ──────────► SQLite  ─────────► make_chunks()
+  (CSV)              (metadatos)            │
+                                        SQLite
+                                        (chunks)
 ```
 
-### Método 2: PDF (fallback)
+### Hilo 1 — Discovery
 
-Si el HTML no está disponible, descarga el PDF y extrae el texto usando **PyMuPDF** (`fitz`). Se aplica la misma limpieza posterior.
+- Llama a `client.fetch_ids()` en cada cliente registrado
+- Construye IDs compuestos: `client.make_doc_id(local_id)` → `"arxiv:2301.12345"`
+- Persiste los nuevos en `IdStore` (CSV thread-safe)
+- Avanza el offset en cada ciclo; continúa hacia contenido más antiguo
+  si la página ya era conocida
 
----
+### Hilo 2 — Downloader
 
-## Algoritmo de chunking
+- Lee lotes de IDs pendientes de `IdStore`, los agrupa por fuente
+- Llama a `client.fetch_documents(local_ids)` para cada fuente
+- Guarda metadatos en SQLite con upsert idempotente
+  (no borra el estado de texto existente si ya estaba indexado)
+- Marca los IDs como descargados en `IdStore`
 
-El texto extraído se divide en chunks usando un **sliding window semántico a nivel de oración**.
+### Hilo 3 — Text
 
-### Detección de oraciones
-
-El texto se parte por fronteras lingüísticas, no por caracteres arbitrarios:
-
-```python
-# Punto/!/? solo si lo sigue mayuscula o digito (evita "Fig. 3", "et al.")
-r'(?<=[.!?])\s+(?=[A-Z\"\'(0-9])'
-# Punto y coma siempre separa
-r'|(?<=;)\s+'
-```
-
-Las oraciones muy cortas (< 20 chars) se fusionan con la siguiente para evitar que abreviaturas sueltas queden como oraciones independientes.
-
-### Solapamiento entre chunks
-
-Los párrafos actúan como fronteras duras — nunca hay solapamiento entre párrafos distintos. Dentro de un párrafo, las últimas `overlap_sentences` oraciones del chunk emitido se incluyen al inicio del siguiente:
-
-```
-Oraciones del parrafo: [A] [B] [C] [D] [E] [F] [G] [H]
-
-chunk_size=300, overlap=2:
-
-Chunk 1 -> A B C D
-Chunk 2 -> C D E F      <- C y D repetidas como contexto
-Chunk 3 -> E F G H      <- E y F repetidas como contexto
-```
-
-Esto garantiza que ningún concepto queda partido sin que al menos un chunk lo contenga completo, mejorando significativamente la calidad de la búsqueda semántica.
-
-### Parámetros de chunking en `CrawlerConfig`
-
-| Campo | Default | Descripción |
-|---|---|---|
-| `chunk_size` | 1000 | Tamaño máximo de cada chunk en caracteres |
-| `overlap_sentences` | 2 | Oraciones compartidas entre chunks consecutivos |
+- Lee de SQLite los documentos con `pdf_downloaded = 0`
+- Enruta al cliente correcto por el prefijo del ID compuesto
+- Llama a `client.download_text(local_id)` — el cliente decide cómo obtener el texto
+- Fragmenta con `chunker.make_chunks(text, chunk_size, overlap_sentences)`
+- Persiste texto completo y chunks en SQLite
+- Si falla, marca el documento con `pdf_downloaded = 2` (error) y continúa
 
 ---
 
 ## Políticas de crawling
 
-### robots.txt
+### Dónde se declaran
 
-El módulo `robots.py` verifica robots.txt antes de cada request. Los dominios de arXiv están en una **allowlist** porque su API pública está explícitamente documentada y permitida.
+Cada cliente declara su política directamente en su propia clase. `robots.py` es
+completamente genérico y no contiene ningún dominio hardcodeado.
 
-### Rate limiting
+```python
+class ArxivClient(BaseClient):
 
-| Componente | Delay mínimo |
-|---|---|
-| API de metadatos (`arxiv_client.py`) | 3.5s entre requests |
-| Extractor HTML/PDF (`pdf_extractor.py`) | 3.0s entre requests |
-| Entre extracciones individuales (`crawler.py`) | 2.0s |
+    @property
+    def request_delay(self) -> float:
+        return 15.0    # igual al Crawl-delay: 15 del robots.txt de arXiv
 
-### Límite de tamaño
+    @property
+    def trusted_domains(self) -> FrozenSet[str]:
+        return frozenset({"arxiv.org", "export.arxiv.org"})
+        # robots.txt tiene Disallow: /api, pero la API Atom esta autorizada
+        # por ToS -> bypass solo en allowed(), nunca en crawl_delay()
+```
 
-Los PDFs mayores de **15 MB** se rechazan automáticamente. Se marcan con `pdf_downloaded = 2` (error) y el crawler continúa con el siguiente documento.
+### Cómo se aplica el delay
+
+```python
+effective_delay = max(client.request_delay, checker.crawl_delay(url))
+```
+
+Para arXiv: `max(15.0, 15.0) = 15.0 s`. Si arXiv endurece su política en el
+futuro, el valor del `robots.txt` tomará precedencia automáticamente sin tocar
+el código del cliente.
+
+### Thread-safety del rate-limiter
+
+`_rate_lock` y `_last_request` son **variables de clase** en `ArxivClient`
+(no de instancia). Todas las instancias, en cualquier hilo, comparten el mismo
+contador. Si el `Crawler` tiene 3 hilos activos o se crean múltiples instancias,
+ninguno puede saltarse el delay:
+
+```
+Hilo discovery:   with ArxivClient._rate_lock → espera → lanza petición
+Hilo downloader:  with ArxivClient._rate_lock → bloqueado hasta que discovery termine
+Hilo text:        with ArxivClient._rate_lock → bloqueado hasta que downloader termine
+```
+
+El `time.sleep()` ocurre **dentro** del lock para que el siguiente hilo empiece
+su cuenta desde el momento en que el anterior reservó su turno, no desde que
+terminó de descargar.
+
+### `robots.py` — genérico y sin bypass de delay
+
+| Método | Usa `trusted_domains` | Por qué |
+|---|---|---|
+| `allowed(url, trusted_domains)` | Sí (lo pasa el cliente) | Evita falsos negativos en Disallow |
+| `crawl_delay(url)` | Nunca | El delay siempre se lee del robots.txt real |
+
+---
+
+## Algoritmo de chunking (`chunker.py`)
+
+Módulo independiente de cualquier fuente. Recibe texto limpio y devuelve
+una lista de fragmentos.
+
+### División en oraciones
+
+Respeta texto científico (evita partir en "Fig. 3", "et al.", etc.):
+
+- Punto/!/? seguido de mayúscula o dígito
+- Punto y coma como frontera blanda
+- Oraciones menores de 20 caracteres se fusionan con la siguiente
+
+### Solapamiento semántico
+
+Los párrafos (`\n\n`) son fronteras duras. Dentro de un párrafo, las últimas
+`N` oraciones de un chunk se repiten al inicio del siguiente:
+
+```
+Oraciones: [A] [B] [C] [D] [E] [F] [G] [H]   (chunk_size=300, overlap=2)
+
+Chunk 1 ->  A  B  C  D
+Chunk 2 ->  C  D  E  F     <- C y D repetidas como contexto de transición
+Chunk 3 ->  E  F  G  H     <- E y F repetidas como contexto de transición
+```
+
+Ningún concepto queda partido entre chunks sin que al menos uno lo contenga completo.
+
+---
+
+## Añadir un nuevo cliente
+
+Solo hay que crear un archivo nuevo e implementar `BaseClient`.
+El resto del sistema no necesita ningún cambio:
+
+```python
+# crawler/clients/semantic_scholar_client.py
+
+from typing import FrozenSet, List
+from ..clients.base_client import BaseClient
+from ..document import Document
+
+
+class SemanticScholarClient(BaseClient):
+
+    @property
+    def source_name(self) -> str:
+        return "semantic_scholar"
+
+    @property
+    def request_delay(self) -> float:
+        return 5.0   # Crawl-delay del robots.txt de Semantic Scholar
+
+    @property
+    def trusted_domains(self) -> FrozenSet[str]:
+        return frozenset({"api.semanticscholar.org"})
+
+    def fetch_ids(self, max_results: int = 100, start: int = 0) -> List[str]:
+        # llamar a la API y devolver IDs locales (sin prefijo)
+        ...
+
+    def fetch_documents(self, local_ids: List[str]) -> List[Document]:
+        # descargar metadatos y devolver Documents con doc_id compuesto
+        # doc_id = self.make_doc_id(local_id)  ->  "semantic_scholar:abc123"
+        ...
+
+    def download_text(self, local_id: str, **kwargs) -> str:
+        # descargar y devolver el texto limpio del documento
+        # el Crawler se encarga del chunking despues
+        ...
+```
+
+Registrar el cliente en el Crawler:
+
+```python
+from backend.crawler.crawler import Crawler, CrawlerConfig
+from backend.crawler.clients.arxiv_client import ArxivClient
+from backend.crawler.clients.semantic_scholar_client import SemanticScholarClient
+
+crawler = Crawler(
+    config=CrawlerConfig(chunk_size=1000, overlap_sentences=2),
+    clients=[ArxivClient(), SemanticScholarClient()],
+)
+crawler.run_forever()
+```
+
+---
+
+## Arrancar el Crawler
+
+```python
+from backend.crawler import Crawler, CrawlerConfig, ArxivClient
+
+crawler = Crawler(
+    config=CrawlerConfig(
+        ids_per_discovery  = 500,
+        batch_size         = 20,
+        pdf_batch_size     = 5,
+        discovery_interval = 120.0,   # segundos entre ciclos de discovery
+        download_interval  = 30.0,    # segundos entre ciclos de metadatos
+        pdf_interval       = 15.0,    # pausa entre documentos de texto
+        chunk_size         = 1000,    # caracteres maximos por chunk
+        overlap_sentences  = 2,       # oraciones de solapamiento
+    ),
+    clients=[ArxivClient()],
+)
+crawler.run_forever()
+```
+
+O desde el orquestador:
+
+```bash
+python -m backend.orchestrator.main
+```
+
+---
+
+## Tests
+
+```bash
+# Suite principal (sin red, ~1s)
+python -m pytest backend/tests/test_crawler.py -v -m "not network"
+
+# Con tests de red (requiere internet, ~5min por los delays de 15s)
+python -m pytest backend/tests/test_crawler.py -v -m "network"
+
+```
+
+| Clase de test | Tests | Qué verifica |
+|---|---|---|
+| `TestDocument` | 13 | `doc_id`, alias `arxiv_id`, CSV nuevo y legado |
+| `TestIdStore` | 9 | IDs compuestos, columna `doc_id`, retrocompat |
+| `TestRobots` | 6 | Genérico, sin dominios hardcodeados, `crawl_delay` sin bypass |
+| `TestBaseClient` | 11 | Propiedades abstractas, `make_doc_id`, `parse_doc_id` |
+| `TestArxivClient` | 18 | Política (delay=15s, trusted_domains), thread-safety, parseo XML |
+| `TestChunker` | 12 | `clean_text`, solapamiento, fronteras de párrafo |
+| `TestArxivTextExtraction` | 5 | LaTeXML extractor, skip bibliografía/autores |
+| `TestCrawlerRouting/Discovery/Text` | 11 | Routing multi-cliente, pipeline con SQLite |
+| `TestBackwardCompatImports` | 4 | Imports desde rutas antiguas |
+| `TestEndToEndFakeClient` | 2 | Pipeline completo mono y multi-fuente |
 
 ---
 
@@ -223,51 +319,53 @@ Los PDFs mayores de **15 MB** se rechazan automáticamente. Se marcan con `pdf_d
 ### Inspector de la BD
 
 ```bash
-python -m backend.tools.inspect_db                     # resumen completo
-python -m backend.tools.inspect_db --watch             # refresco automatico
-python -m backend.tools.inspect_db --docs 10           # ultimos N documentos
-python -m backend.tools.inspect_db --doc 2301.12345    # detalle de un doc
-python -m backend.tools.inspect_db --text 2301.12345   # texto guardado en BD
-python -m backend.tools.inspect_db --chunk 2301.12345 --idx 3  # un chunk concreto
-python -m backend.tools.inspect_db --errors            # documentos con error
-python -m backend.tools.inspect_db --categories        # distribucion por categoria
-python -m backend.tools.inspect_db --crawl-log         # historial del crawler
+python -m backend.tools.inspect_db                           # resumen completo
+python -m backend.tools.inspect_db --watch                   # refresco automatico
+python -m backend.tools.inspect_db --doc arxiv:2301.12345    # detalle de un doc
+python -m backend.tools.inspect_db --text arxiv:2301.12345   # texto guardado
+python -m backend.tools.inspect_db --errors                  # docs con error
+python -m backend.tools.inspect_db --categories              # distribución por categoría
+python -m backend.tools.inspect_db --crawl-log               # historial de ejecuciones
 ```
 
-### Reconstrucción de chunks
+### Renombrado de IDs (`rename_ids.py`)
 
-Útil tras cambiar el algoritmo de chunking o los parámetros `chunk_size` / `overlap`:
+Para migrar IDs del formato antiguo (`2301.12345`) al nuevo (`arxiv:2301.12345`):
 
 ```bash
-# Simular sin modificar nada
+# Ver qué cambiaría sin tocar nada (dry-run por defecto)
+python -m backend.tools.rename_ids --prefix arxiv
+
+# Aplicar con copia de seguridad y verificación
+python -m backend.tools.rename_ids --prefix arxiv --backup --verify --apply
+
+# Solo algunos IDs (filtro glob)
+python -m backend.tools.rename_ids --prefix arxiv --filter "2301.*" --apply --yes
+
+# Renombrar un ID concreto
+python -m backend.tools.rename_ids --rename 2301.12345 arxiv:2301.12345 --apply
+
+# Lote desde CSV (columnas: old_id, new_id)
+python -m backend.tools.rename_ids --mapping migration.csv --apply --yes --verify
+```
+
+Actualiza en cascada y de forma atómica las tres tablas afectadas:
+`documents.arxiv_id`, `chunks.arxiv_id` y `postings.doc_id`.
+
+### Reconstrucción de chunks (`rebuild_chunks.py`)
+
+Tras cambiar `chunk_size` u `overlap_sentences`:
+
+```bash
 python -m backend.tools.rebuild_chunks --dry-run
-
-# Reconstruir con nuevos parametros
 python -m backend.tools.rebuild_chunks --chunk-size 800 --overlap 3
-
-# Sin confirmacion interactiva (para scripts)
 python -m backend.tools.rebuild_chunks --yes
 ```
 
-Después de reconstruir los chunks hay que re-embedizar:
+Después hay que re-embedizar:
 
 ```bash
 python -m backend.tools.embed_chunks --reembed
-```
-
----
-
-## Tests
-
-```bash
-# Tests sin red (unit tests locales)
-python -m backend.tests.test_crawler --skip-network
-
-# Solo verificar integridad de la BD real
-python -m backend.tests.test_crawler --only-db
-
-# Suite completa (requiere conexion a internet)
-python -m backend.tests.test_crawler
 ```
 
 ---
@@ -276,9 +374,27 @@ python -m backend.tests.test_crawler
 
 ```
 backend/data/
-+-- ids_article.csv     <- todos los IDs descubiertos
-+-- documents.csv       <- metadatos de cada articulo (backup plano)
-+-- app.log             <- log completo de ejecucion
-+-- db/
-    +-- documents.db    <- base de datos SQLite principal
+├── ids_article.csv      ← IDs compuestos descubiertos (col: doc_id)
+├── documents.csv        ← metadatos en plano (col: doc_id)
+├── app.log              ← log de ejecución
+└── db/
+    └── documents.db     ← SQLite principal
+                            ├── documents  (metadatos + texto completo)
+                            ├── chunks     (fragmentos + embeddings)
+                            ├── crawl_log  (historial de ejecuciones)
+                            ├── terms      (vocabulario índice TF)
+                            └── postings   (frecuencias por término/doc)
 ```
+
+---
+
+## Decisiones de diseño clave
+
+| Decisión | Por qué |
+|---|---|
+| `pdf_extractor.py` eliminado | El Crawler llama a `client.download_text()` directamente. Sin intermediarios. |
+| `_rate_lock` a nivel de clase | Coordina múltiples instancias e hilos sin shared state implícito. |
+| `crawl_delay()` sin bypass | El delay es una restricción de frecuencia que se cumple siempre, aunque el dominio esté en `trusted_domains`. |
+| `trusted_domains` por cliente | `robots.py` permanece genérico. Cada cliente conoce sus propias excepciones de ToS. |
+| IDs compuestos | El resto del sistema trata el ID como string opaco — cero cambios al añadir nuevas fuentes. |
+| Chunking separado del transporte | Un cliente nuevo solo implementa `download_text()`. El algoritmo de fragmentación no se duplica. |
