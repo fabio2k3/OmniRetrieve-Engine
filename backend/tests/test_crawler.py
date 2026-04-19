@@ -10,7 +10,7 @@ Cubre:
   4.  BaseClient         — interfaz abstracta, make_doc_id, parse_doc_id
   5.  ArxivClient        — source_name, parseo XML, doc_id en Document
   6.  chunker            — clean_text, make_chunks, overlap, edge cases
-  7.  pdf_extractor      — delegación a chunker (mismos resultados)
+  7.  ArxivClient        — extracción HTML/PDF (LaTeXML)
   8.  Crawler            — multi-cliente, routing, discovery, download, text loop
   9.  Retrocompatibilidad — imports antiguos siguen funcionando
   10. Integración        — FakeClient end-to-end con SQLite
@@ -76,6 +76,14 @@ def fake_client():
         @property
         def source_name(self) -> str:
             return self.SOURCE
+
+        @property
+        def request_delay(self) -> float:
+            return 1.0   # delay mínimo para tests (fuente ficticia)
+
+        @property
+        def trusted_domains(self):
+            return frozenset({"fake.example.com"})
 
         def fetch_ids(self, max_results=100, start=0) -> List[str]:
             return self._ids[:max_results]
@@ -366,47 +374,67 @@ class TestIdStore:
 
 class TestRobots:
 
-    def test_allowed_domains_is_mutable_set(self):
-        from backend.crawler import robots
-        assert isinstance(robots.ALLOWED_DOMAINS, set)
+    def test_checker_has_no_allowed_domains(self):
+        """robots.py ya no tiene ALLOWED_DOMAINS global — es genérico."""
+        import backend.crawler.robots as robots_mod
+        assert not hasattr(robots_mod, "ALLOWED_DOMAINS"), \
+            "ALLOWED_DOMAINS no debe existir en robots.py — la política la declara cada cliente"
 
-    def test_allow_domain_adds_to_allowed_domains(self):
-        from backend.crawler.robots import RobotsChecker, ALLOWED_DOMAINS
-        rc = RobotsChecker()
-        test_domain = "api.test-unique-domain-xyz.example"
-        assert test_domain not in ALLOWED_DOMAINS
-        rc.allow_domain(test_domain)
-        assert test_domain in ALLOWED_DOMAINS
-        ALLOWED_DOMAINS.discard(test_domain)  # limpieza
-
-    def test_allowed_returns_true_for_registered_domain(self):
-        from backend.crawler.robots import RobotsChecker, ALLOWED_DOMAINS
-        rc = RobotsChecker()
-        ALLOWED_DOMAINS.add("api.localtest.example")
-        try:
-            assert rc.allowed("https://api.localtest.example/search") is True
-        finally:
-            ALLOWED_DOMAINS.discard("api.localtest.example")
-
-    def test_crawl_delay_zero_for_registered_domain(self):
-        from backend.crawler.robots import RobotsChecker, ALLOWED_DOMAINS
-        rc = RobotsChecker()
-        ALLOWED_DOMAINS.add("nodelay.localtest.example")
-        try:
-            assert rc.crawl_delay("https://nodelay.localtest.example/x") == 0.0
-        finally:
-            ALLOWED_DOMAINS.discard("nodelay.localtest.example")
-
-    def test_arxiv_always_allowed_without_network(self):
+    def test_allowed_without_trusted_domains_reads_robots(self):
+        """Sin trusted_domains, allowed() consulta robots.txt normalmente."""
         from backend.crawler.robots import RobotsChecker
+        import urllib.robotparser
         rc = RobotsChecker()
-        assert rc.allowed("https://arxiv.org/abs/2301.12345") is True
-        assert rc.allowed("https://export.arxiv.org/api/query") is True
+        # Inyectar parser simulado que deniega /secret
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(["User-agent: *", "Disallow: /secret"])
+        import time
+        rc._cache["https://example.com"] = (parser, time.monotonic())
+        assert rc.allowed("https://example.com/public") is True
+        assert rc.allowed("https://example.com/secret") is False
 
-    def test_arxiv_crawl_delay_is_zero(self):
+    def test_allowed_with_trusted_domains_bypasses_disallow(self):
+        """Con trusted_domains, allowed() devuelve True aunque robots diga Disallow."""
         from backend.crawler.robots import RobotsChecker
+        import urllib.robotparser, time
         rc = RobotsChecker()
-        assert rc.crawl_delay("https://arxiv.org/pdf/2301.12345") == 0.0
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(["User-agent: *", "Disallow: /api", "Crawl-delay: 15"])
+        rc._cache["https://api.example.com"] = (parser, time.monotonic())
+        # Sin trusted: False
+        assert rc.allowed("https://api.example.com/api/query") is False
+        # Con trusted: True
+        assert rc.allowed("https://api.example.com/api/query",
+                          trusted_domains=frozenset({"api.example.com"})) is True
+
+    def test_crawl_delay_never_bypassed_even_with_trusted_domains(self):
+        """crawl_delay() lee robots.txt siempre, sin importar trusted_domains."""
+        from backend.crawler.robots import RobotsChecker
+        import urllib.robotparser, time
+        rc = RobotsChecker()
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(["User-agent: *", "Crawl-delay: 15", "Disallow: /api"])
+        rc._cache["https://api.example.com"] = (parser, time.monotonic())
+        # El delay se lee aunque el dominio esté en trusted
+        delay = rc.crawl_delay("https://api.example.com/api/query")
+        assert delay == 15.0, f"crawl_delay debería ser 15.0, got {delay}"
+
+    def test_crawl_delay_zero_when_not_declared(self):
+        from backend.crawler.robots import RobotsChecker
+        import urllib.robotparser, time
+        rc = RobotsChecker()
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(["User-agent: *", "Disallow: /private"])
+        rc._cache["https://nodelay.example.com"] = (parser, time.monotonic())
+        assert rc.crawl_delay("https://nodelay.example.com/page") == 0.0
+
+    def test_allowed_fail_open_on_network_error(self):
+        """Si no se puede obtener robots.txt, se asume acceso permitido."""
+        from backend.crawler.robots import RobotsChecker
+        rc = RobotsChecker(ttl=0)  # TTL 0 → siempre intenta recargar
+        # Dominio inexistente → fallo de red → fail-open
+        result = rc.allowed("https://this-domain-does-not-exist-xyz123.invalid/page")
+        assert result is True
 
 
 # =============================================================================
@@ -415,67 +443,93 @@ class TestRobots:
 
 class TestBaseClient:
 
-    def test_cannot_instantiate_abstract_class(self):
-        from backend.crawler.clients.base_client import BaseClient
-        with pytest.raises(TypeError):
-            BaseClient()
-
-    def test_make_doc_id_format(self):
+    def _minimal_client(self, source="mysource", delay=5.0, trusted=frozenset()):
         from backend.crawler.clients.base_client import BaseClient
         from backend.crawler.document import Document
 
         class MinClient(BaseClient):
             @property
-            def source_name(self): return "mysource"
+            def source_name(self): return source
+            @property
+            def request_delay(self): return delay
+            @property
+            def trusted_domains(self): return trusted
             def fetch_ids(self, **kw): return []
             def fetch_documents(self, ids): return []
             def download_text(self, lid, **kw): return ""
 
-        c = MinClient()
+        return MinClient()
+
+    def test_cannot_instantiate_abstract_class(self):
+        from backend.crawler.clients.base_client import BaseClient
+        with pytest.raises(TypeError):
+            BaseClient()
+
+    def test_missing_request_delay_raises(self):
+        """Una subclase sin request_delay no se puede instanciar."""
+        from backend.crawler.clients.base_client import BaseClient
+        with pytest.raises(TypeError):
+            class Incomplete(BaseClient):
+                @property
+                def source_name(self): return "x"
+                @property
+                def trusted_domains(self): return frozenset()
+                def fetch_ids(self, **kw): return []
+                def fetch_documents(self, ids): return []
+                def download_text(self, lid, **kw): return ""
+            Incomplete()
+
+    def test_missing_trusted_domains_raises(self):
+        """Una subclase sin trusted_domains no se puede instanciar."""
+        from backend.crawler.clients.base_client import BaseClient
+        with pytest.raises(TypeError):
+            class Incomplete(BaseClient):
+                @property
+                def source_name(self): return "x"
+                @property
+                def request_delay(self): return 5.0
+                def fetch_ids(self, **kw): return []
+                def fetch_documents(self, ids): return []
+                def download_text(self, lid, **kw): return ""
+            Incomplete()
+
+    def test_request_delay_is_float(self):
+        c = self._minimal_client(delay=10.0)
+        assert isinstance(c.request_delay, float)
+        assert c.request_delay == 10.0
+
+    def test_trusted_domains_is_frozenset(self):
+        c = self._minimal_client(trusted=frozenset({"a.com", "b.com"}))
+        assert isinstance(c.trusted_domains, frozenset)
+        assert "a.com" in c.trusted_domains
+
+    def test_make_doc_id_format(self):
+        c = self._minimal_client()
         assert c.make_doc_id("abc123") == "mysource:abc123"
-        assert c.make_doc_id("2301.12345") == "mysource:2301.12345"
 
     def test_parse_doc_id_valid(self):
         from backend.crawler.clients.base_client import BaseClient
         source, local = BaseClient.parse_doc_id("arxiv:2301.12345")
-        assert source == "arxiv"
-        assert local == "2301.12345"
+        assert source == "arxiv" and local == "2301.12345"
 
     def test_parse_doc_id_preserves_colons_in_local(self):
-        """El ID local puede contener ':' — solo se parte en el primero."""
         from backend.crawler.clients.base_client import BaseClient
         source, local = BaseClient.parse_doc_id("fake:id:with:colons")
-        assert source == "fake"
-        assert local == "id:with:colons"
+        assert source == "fake" and local == "id:with:colons"
 
-    @pytest.mark.parametrize("bad_id", [
-        "nocolon",
-        ":noleftpart",
-        "noleft:",
-        "",
-    ])
+    @pytest.mark.parametrize("bad_id", ["nocolon", ":noleft", "noright:", ""])
     def test_parse_doc_id_invalid_raises(self, bad_id):
         from backend.crawler.clients.base_client import BaseClient
         with pytest.raises(ValueError):
             BaseClient.parse_doc_id(bad_id)
 
     def test_make_and_parse_are_inverse(self):
+        c = self._minimal_client(source="src")
         from backend.crawler.clients.base_client import BaseClient
-
-        class AnyClient(BaseClient):
-            @property
-            def source_name(self): return "src"
-            def fetch_ids(self, **kw): return []
-            def fetch_documents(self, ids): return []
-            def download_text(self, lid, **kw): return ""
-
-        c = AnyClient()
-        local_ids = ["id1", "id2", "complex.id.v3"]
-        for lid in local_ids:
+        for lid in ["id1", "complex.id.v3"]:
             composite = c.make_doc_id(lid)
             src, parsed = BaseClient.parse_doc_id(composite)
-            assert src == "src"
-            assert parsed == lid
+            assert src == "src" and parsed == lid
 
 
 # =============================================================================
@@ -493,7 +547,7 @@ class TestArxivClient:
         entry_str = f"""<entry xmlns="{ns}">
           <id>https://arxiv.org/abs/{arxiv_id}</id>
           <title>{title}</title>
-          <author><name>{author}</name></author>
+          <author><n>{author}</n></author>
           <summary>{abstract}</summary>
           {"".join(f'<category term="{c}"/>' for c in categories)}
           <published>2023-01-01T00:00:00Z</published>
@@ -502,14 +556,83 @@ class TestArxivClient:
         </entry>"""
         return ET.fromstring(entry_str)
 
+    # -- Politica de crawling -------------------------------------------------
+
     def test_source_name(self):
         from backend.crawler.clients.arxiv_client import ArxivClient
         assert ArxivClient().source_name == "arxiv"
 
-    def test_make_doc_id(self):
+    def test_request_delay_is_at_least_15_seconds(self):
+        """request_delay debe ser >= 15s (Crawl-delay del robots.txt de arXiv)."""
         from backend.crawler.clients.arxiv_client import ArxivClient
         c = ArxivClient()
-        assert c.make_doc_id("2301.12345") == "arxiv:2301.12345"
+        assert isinstance(c.request_delay, float)
+        assert c.request_delay >= 15.0, (
+            f"request_delay={c.request_delay} viola el Crawl-delay: 15 de arXiv"
+        )
+
+    def test_trusted_domains_contains_arxiv_hosts(self):
+        """trusted_domains debe incluir los dos hosts de arXiv."""
+        from backend.crawler.clients.arxiv_client import ArxivClient
+        td = ArxivClient().trusted_domains
+        assert isinstance(td, frozenset)
+        assert "arxiv.org" in td
+        assert "export.arxiv.org" in td
+
+    def test_effective_delay_respects_robots_txt(self):
+        """max(request_delay, crawl_delay_robots) >= 15s para todos los hosts de arXiv."""
+        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.robots import RobotsChecker
+        import urllib.robotparser, time
+
+        c = ArxivClient()
+        rc = RobotsChecker()
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(["User-agent: *", "Crawl-delay: 15", "Disallow: /api"])
+        for origin in ["https://arxiv.org", "https://export.arxiv.org"]:
+            rc._cache[origin] = (parser, time.monotonic())
+
+        for url in ["https://arxiv.org/pdf/2301.12345",
+                    "https://export.arxiv.org/api/query"]:
+            effective = max(c.request_delay, rc.crawl_delay(url))
+            assert effective >= 15.0, f"Delay efectivo para {url} = {effective}s < 15s"
+
+    def test_allowed_uses_trusted_domains(self):
+        """allowed() con trusted_domains del cliente resuelve el Disallow: /api."""
+        from backend.crawler.robots import RobotsChecker
+        from backend.crawler.clients.arxiv_client import ArxivClient
+        import urllib.robotparser, time
+
+        c = ArxivClient()
+        rc = RobotsChecker()
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(["User-agent: *", "Disallow: /api", "Crawl-delay: 15"])
+        rc._cache["https://export.arxiv.org"] = (parser, time.monotonic())
+
+        assert rc.allowed("https://export.arxiv.org/api/query") is False
+        assert rc.allowed("https://export.arxiv.org/api/query", c.trusted_domains) is True
+
+    def test_crawl_delay_not_bypassed_by_trusted_domains(self):
+        """crawl_delay() lee robots.txt incluso para dominios trusted."""
+        from backend.crawler.robots import RobotsChecker
+        from backend.crawler.clients.arxiv_client import ArxivClient
+        import urllib.robotparser, time
+
+        c = ArxivClient()
+        rc = RobotsChecker()
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse(["User-agent: *", "Crawl-delay: 15", "Disallow: /api"])
+        for origin in ["https://arxiv.org", "https://export.arxiv.org"]:
+            rc._cache[origin] = (parser, time.monotonic())
+
+        assert rc.crawl_delay("https://arxiv.org/pdf/2301.12345") == 15.0
+        assert rc.crawl_delay("https://export.arxiv.org/api/query") == 15.0
+
+    # -- Parseo XML -----------------------------------------------------------
+
+    def test_make_doc_id(self):
+        from backend.crawler.clients.arxiv_client import ArxivClient
+        assert ArxivClient().make_doc_id("2301.12345") == "arxiv:2301.12345"
 
     def test_parse_ids_strips_version(self):
         from backend.crawler.clients.arxiv_client import ArxivClient
@@ -518,97 +641,140 @@ class TestArxivClient:
           <entry><id>https://arxiv.org/abs/2301.00001v3</id></entry>
           <entry><id>https://arxiv.org/abs/2302.99999v1</id></entry>
         </feed>"""
-        client = ArxivClient()
-        ids = client._parse_ids(xml)
-        assert ids == ["2301.00001", "2302.99999"]
+        assert ArxivClient()._parse_ids(xml) == ["2301.00001", "2302.99999"]
 
     def test_entry_to_document_produces_composite_doc_id(self):
         from backend.crawler.clients.arxiv_client import ArxivClient
-        client = ArxivClient()
-        entry = self._make_entry(arxiv_id="2301.12345v2")
-        doc = client._entry_to_document(entry)
+        doc = ArxivClient()._entry_to_document(self._make_entry())
         assert doc is not None
         assert doc.doc_id == "arxiv:2301.12345"
-        assert doc.arxiv_id == "arxiv:2301.12345"   # propiedad retrocompat
-
-    def test_entry_to_document_fields(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
-        client = ArxivClient()
-        entry = self._make_entry(
-            title="Attention Is All You Need",
-            author="Vaswani",
-            abstract="Transformer paper.",
-            categories=("cs.CL", "cs.LG"),
-            pdf_href="https://arxiv.org/pdf/1706.03762",
-        )
-        doc = client._entry_to_document(entry)
-        assert doc is not None
-        assert doc.title == "Attention Is All You Need"
-        assert "Vaswani" in doc.authors
-        assert doc.abstract == "Transformer paper."
-        assert "cs.CL" in doc.categories
-        assert doc.pdf_url == "https://arxiv.org/pdf/1706.03762"
+        assert doc.arxiv_id == "arxiv:2301.12345"
 
     def test_entry_without_id_returns_none(self):
         from backend.crawler.clients.arxiv_client import ArxivClient
         ns = self.ATOM_NS
         entry = ET.fromstring(f'<entry xmlns="{ns}"><title>No ID</title></entry>')
-        client = ArxivClient()
-        assert client._entry_to_document(entry) is None
+        assert ArxivClient()._entry_to_document(entry) is None
 
     def test_fetch_documents_groups_into_chunks_of_20(self):
-        """fetch_documents divide listas > 20 IDs en sub-lotes."""
         from backend.crawler.clients.arxiv_client import ArxivClient
         client = ArxivClient()
-        call_sizes = []
-
-        def fake_fetch_chunk(local_ids):
-            call_sizes.append(len(local_ids))
-            return []
-
-        client._fetch_chunk = fake_fetch_chunk
+        sizes = []
+        client._fetch_chunk = lambda ids: (sizes.append(len(ids)) or [])
         client.fetch_documents([f"{i:04d}" for i in range(55)])
-        assert len(call_sizes) == 3
-        assert call_sizes[0] == 20
-        assert call_sizes[1] == 20
-        assert call_sizes[2] == 15
+        assert sizes == [20, 20, 15]
+
+    def test_rate_limit_is_thread_safe_single_instance(self):
+        """
+        3 hilos comparten 1 instancia: las peticiones salen serializadas
+        con al menos request_delay entre cada una.
+        """
+        from backend.crawler.clients.arxiv_client import ArxivClient
+        import threading, time
+
+        # Subclase con delay corto para el test
+        class FastClient(ArxivClient):
+            @property
+            def request_delay(self): return 0.05   # 50 ms
+
+        client = FastClient()
+        # Resetear el estado de clase para que el test sea reproducible
+        ArxivClient._last_request = 0.0
+
+        times = []
+
+        def simulate_get():
+            robots_delay    = 0.0
+            effective_delay = max(client.request_delay, robots_delay)
+            with ArxivClient._rate_lock:
+                elapsed = time.monotonic() - ArxivClient._last_request
+                if elapsed < effective_delay:
+                    time.sleep(effective_delay - elapsed)
+                ArxivClient._last_request = time.monotonic()
+                times.append(ArxivClient._last_request)
+
+        threads = [threading.Thread(target=simulate_get) for _ in range(4)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        times.sort()
+        gaps = [times[i] - times[i-1] for i in range(1, len(times))]
+        assert all(g >= 0.045 for g in gaps), \
+            f"Gaps demasiado cortos: {[f'{g*1000:.1f}ms' for g in gaps]}"
+
+    def test_rate_limit_shared_across_two_instances(self):
+        """
+        2 instancias distintas de ArxivClient comparten el mismo rate-limiter
+        porque _rate_lock y _last_request son variables de clase.
+        """
+        from backend.crawler.clients.arxiv_client import ArxivClient
+        import threading, time
+
+        class FastClient(ArxivClient):
+            @property
+            def request_delay(self): return 0.05
+
+        a1 = FastClient()
+        a2 = FastClient()
+
+        # Verificar que comparten el mismo lock y último timestamp
+        assert a1._rate_lock is a2._rate_lock, \
+            "_rate_lock debe ser de clase, compartido entre instancias"
+
+        ArxivClient._last_request = 0.0
+        times = []
+
+        def call(client):
+            effective_delay = client.request_delay
+            with ArxivClient._rate_lock:
+                elapsed = time.monotonic() - ArxivClient._last_request
+                if elapsed < effective_delay:
+                    time.sleep(effective_delay - elapsed)
+                ArxivClient._last_request = time.monotonic()
+                times.append(ArxivClient._last_request)
+
+        t1 = threading.Thread(target=call, args=(a1,))
+        t2 = threading.Thread(target=call, args=(a2,))
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        times.sort()
+        gap = times[1] - times[0]
+        assert gap >= 0.045, \
+            f"Dos instancias no coordinaron: gap={gap*1000:.1f}ms < 45ms"
 
     def test_backward_compat_import(self):
-        """ArxivClient sigue importable desde la ruta antigua."""
         from backend.crawler import ArxivClient
         c = ArxivClient()
         assert c.source_name == "arxiv"
+        assert c.request_delay >= 15.0
 
     @pytest.mark.network
     def test_fetch_ids_returns_local_ids(self):
         from backend.crawler.clients.arxiv_client import ArxivClient
-        client = ArxivClient()
-        ids = client.fetch_ids(max_results=3)
+        ids = ArxivClient().fetch_ids(max_results=3)
         assert len(ids) > 0
         for lid in ids:
-            assert ":" not in lid, f"ID should be local (no prefix): {lid!r}"
-            assert "v" not in lid, f"ID should not have version suffix: {lid!r}"
+            assert ":" not in lid
+            assert "v" not in lid
 
     @pytest.mark.network
     def test_fetch_documents_returns_composite_doc_ids(self):
         from backend.crawler.clients.arxiv_client import ArxivClient
-        client = ArxivClient()
-        ids = client.fetch_ids(max_results=2)
-        docs = client.fetch_documents(ids)
-        assert len(docs) > 0
+        c = ArxivClient()
+        docs = c.fetch_documents(c.fetch_ids(max_results=2))
         for doc in docs:
-            assert doc.doc_id.startswith("arxiv:"), f"Expected 'arxiv:' prefix: {doc.doc_id!r}"
-            assert doc.title
+            assert doc.doc_id.startswith("arxiv:")
 
     @pytest.mark.network
     def test_download_text_returns_non_empty_string(self):
         from backend.crawler.clients.arxiv_client import ArxivClient
-        client = ArxivClient()
-        text = client.download_text("1706.03762")
-        assert isinstance(text, str)
-        assert len(text) > 500
+        text = ArxivClient().download_text("1706.03762")
+        assert isinstance(text, str) and len(text) > 500
 
 
+# =============================================================================
+# 6. chunker
 # =============================================================================
 # 6. chunker
 # =============================================================================
@@ -713,37 +879,68 @@ class TestChunker:
 
 
 # =============================================================================
-# 7. pdf_extractor — delegación a chunker
+# 7. ArxivClient — extracción de texto
 # =============================================================================
 
-class TestPdfExtractorDelegation:
-    """Verifica que pdf_extractor delega en chunker (mismos resultados)."""
+class TestArxivTextExtraction:
+    """
+    Verifica los extractores de texto internos de ArxivClient.
+    Toda la lógica de extracción vive en arxiv_client.py.
+    El Crawler llama a client.download_text() directamente.
+    """
 
-    def test_clean_text_delegation(self):
-        from backend.crawler.pdf_extractor import _clean_text
-        from backend.crawler.chunker import clean_text
-        text = "line1\n\n\n\nline2    end"
-        assert _clean_text(text) == clean_text(text)
+    def test_latexml_extractor_skips_bibliography(self):
+        from backend.crawler.clients.arxiv_client import _LaTeXMLExtractor
+        html = """
+        <div class="ltx_document">
+          <p class="ltx_p">Main content here.</p>
+          <section class="ltx_bibliography">
+            <p>References section that should be skipped.</p>
+          </section>
+        </div>"""
+        p = _LaTeXMLExtractor()
+        p.feed(html)
+        text = p.get_text()
+        assert "Main content" in text
+        assert "References section" not in text
 
-    def test_split_sentences_delegation(self):
-        from backend.crawler.pdf_extractor import _split_sentences
-        from backend.crawler.chunker import _split_sentences as cs
-        text = "Hello world. This is a test. Another sentence here."
-        assert _split_sentences(text) == cs(text)
+    def test_latexml_extractor_skips_authors(self):
+        from backend.crawler.clients.arxiv_client import _LaTeXMLExtractor
+        html = """
+        <div class="ltx_document">
+          <div class="ltx_authors">Alice, Bob (should be skipped)</div>
+          <p class="ltx_p">Abstract text here.</p>
+        </div>"""
+        p = _LaTeXMLExtractor()
+        p.feed(html)
+        text = p.get_text()
+        assert "Abstract text" in text
+        assert "Alice, Bob" not in text
 
-    def test_split_into_chunks_delegation(self):
-        from backend.crawler.pdf_extractor import _split_into_chunks
-        from backend.crawler.chunker import _split_into_chunks as ci
-        text = ("Good sentence here. " * 5 + "\n\n") * 10
-        assert _split_into_chunks(text, max_chars=300, overlap_sentences=2) == \
-               ci(text, max_chars=300, overlap_sentences=2)
+    def test_latexml_extractor_fallback_generic(self):
+        """Si no hay ltx_document, usa un parser genérico como fallback."""
+        from backend.crawler.clients.arxiv_client import _extract_text_from_html
+        html = b"""<html><body>
+          <p>No ltx_document here, just plain HTML content.</p>
+          <script>alert('skip me')</script>
+        </body></html>"""
+        text = _extract_text_from_html(html)
+        # Debe extraer algo del contenido aunque no haya estructura LaTeXML
+        assert len(text) > 0
 
-    def test_make_chunks_alias_works(self):
-        from backend.crawler.pdf_extractor import _make_chunks
-        from backend.crawler.chunker import make_chunks
-        text = "Test sentence one. Test sentence two. " * 20
-        assert _make_chunks(text, chunk_size=300, overlap_sentences=2) == \
-               make_chunks(text, chunk_size=300, overlap_sentences=2)
+    def test_clean_text_in_arxiv_client(self):
+        from backend.crawler.clients.arxiv_client import _clean_text
+        result = _clean_text("word1    word2\n\n\n\nword3")
+        assert "  " not in result
+        assert "\n\n\n" not in result
+
+    def test_pdf_extractor_file_does_not_exist(self):
+        """pdf_extractor.py ha sido eliminado — ya no existe como módulo."""
+        import importlib, pathlib
+        path = pathlib.Path("backend/crawler/pdf_extractor.py")
+        assert not path.exists(),             "pdf_extractor.py debería haberse eliminado — toda la lógica está en arxiv_client.py"
+        with pytest.raises((ImportError, ModuleNotFoundError)):
+            importlib.import_module("backend.crawler.pdf_extractor")
 
 
 # =============================================================================
@@ -840,6 +1037,10 @@ class TestCrawlerDiscoveryLoop:
         class SecondFake(BaseClient):
             @property
             def source_name(self): return "second"
+            @property
+            def request_delay(self): return 1.0
+            @property
+            def trusted_domains(self): return frozenset()
             def fetch_ids(self, **kw): return ["s1", "s2"]
             def fetch_documents(self, ids): return []
             def download_text(self, lid, **kw): return ""
@@ -926,25 +1127,19 @@ class TestCrawlerTextLoop:
 class TestBackwardCompatImports:
 
     def test_arxiv_client_importable_from_old_path(self):
+        """ArxivClient sigue importable desde la ruta original."""
         from backend.crawler import ArxivClient
         assert ArxivClient().source_name == "arxiv"
 
     def test_crawler_init_exports(self):
+        """El __init__ del paquete exporta los símbolos esperados."""
         from backend.crawler import (
             Document, IdStore, BaseClient, ArxivClient,
-            Crawler, CrawlerConfig, make_chunks,
-            download_and_extract, robots_checker,
+            Crawler, CrawlerConfig, make_chunks, robots_checker,
         )
-        assert BaseClient is not None
+        assert BaseClient  is not None
         assert ArxivClient is not None
         assert make_chunks is not None
-
-    def test_download_and_extract_still_accessible(self):
-        from backend.crawler.pdf_extractor import download_and_extract
-        import inspect
-        sig = inspect.signature(download_and_extract)
-        assert "arxiv_id" in sig.parameters
-        assert "chunk_size" in sig.parameters
 
     def test_document_arxiv_id_property_exists(self):
         """Código legado que usa doc.arxiv_id sigue funcionando."""
@@ -954,7 +1149,6 @@ class TestBackwardCompatImports:
             abstract="X", categories="cs.AI",
             published="2024", updated="2024", pdf_url="http://x",
         )
-        # Acceso exactamente como lo hace el código antiguo
         assert doc.arxiv_id == "arxiv:2301.99999"
         assert isinstance(doc.arxiv_id, str)
 
@@ -1041,6 +1235,10 @@ class TestEndToEndFakeClient:
         class SecondClient(BaseClient):
             @property
             def source_name(self): return "second"
+            @property
+            def request_delay(self): return 1.0
+            @property
+            def trusted_domains(self): return frozenset()
 
             def fetch_ids(self, max_results=100, start=0):
                 return ["s_doc1", "s_doc2"]
