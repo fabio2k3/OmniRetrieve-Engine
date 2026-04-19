@@ -3,9 +3,8 @@ config.py
 =========
 Configuración del orquestador OmniRetrieve-Engine.
 
-Contiene únicamente el dataclass OrchestratorConfig con todos los
-parámetros ajustables del sistema: rutas, tiempos de ciclo del crawler,
-umbral de indexación, parámetros del modelo LSI y del módulo de embedding.
+Todos los parámetros ajustables del sistema viven aquí agrupados por módulo.
+Ningún otro fichero del paquete debe hardcodear valores de comportamiento.
 """
 
 from __future__ import annotations
@@ -17,9 +16,9 @@ from backend.database.schema import DB_PATH, DATA_DIR
 from backend.retrieval.lsi_model import MODEL_PATH
 
 # Rutas por defecto del índice FAISS
-_FAISS_DIR     = DATA_DIR / "faiss"
-_FAISS_INDEX   = _FAISS_DIR / "index.faiss"
-_FAISS_ID_MAP  = _FAISS_DIR / "id_map.npy"
+_FAISS_DIR    = DATA_DIR / "faiss"
+_FAISS_INDEX  = _FAISS_DIR / "index.faiss"
+_FAISS_ID_MAP = _FAISS_DIR / "id_map.npy"
 
 
 @dataclass
@@ -29,69 +28,55 @@ class OrchestratorConfig:
 
     Rutas
     -----
-    db_path : Path
-        Base de datos SQLite compartida por todos los módulos.
-    model_path : Path
-        Archivo .pkl donde se guarda el modelo LSI.
+    db_path    : base de datos SQLite compartida por todos los módulos.
+    model_path : fichero .pkl donde se guarda el modelo LSI.
 
     Crawler
     -------
-    ids_per_discovery : int
-        IDs de arXiv a descubrir por ciclo.
-    batch_size : int
-        Metadatos de artículos a descargar por ciclo.
-    pdf_batch_size : int
-        PDFs a descargar por ciclo.
-    discovery_interval : float
-        Segundos entre ciclos de discovery.
-    download_interval : float
-        Segundos entre ciclos de descarga de metadatos.
-    pdf_interval : float
-        Segundos entre ciclos de descarga de PDF.
+    ids_per_discovery  : IDs a descubrir por ciclo.
+    batch_size         : metadatos de artículos a descargar por ciclo.
+    pdf_batch_size     : PDFs a descargar por ciclo.
+    discovery_interval : segundos entre ciclos de discovery.
+    download_interval  : segundos entre ciclos de descarga de metadatos.
+    pdf_interval       : segundos entre ciclos de descarga de PDF.
 
-    Indexing watcher
-    ----------------
-    pdf_threshold : int
-        Mínimo de PDFs nuevos sin indexar para disparar IndexingPipeline.
-    index_poll_interval : float
-        Segundos entre sondeos del watcher.
-    index_field : str
-        Campo a indexar: 'full_text', 'abstract' o 'both'.
+    Indexing (BM25)
+    ---------------
+    pdf_threshold       : mínimo de PDFs nuevos sin indexar para disparar indexación.
+    index_poll_interval : segundos entre sondeos del watcher.
+    index_field         : campo a indexar: 'full_text', 'abstract' o 'both'.
+    index_batch_size    : documentos por lote en IndexingPipeline BM25.
+    index_use_stemming  : activa SnowballStemmer en el preprocesado BM25.
+    index_min_token_len : longitud mínima de token para BM25.
 
     LSI rebuild
     -----------
-    lsi_rebuild_interval : float
-        Segundos entre reconstrucciones del modelo LSI.
-    lsi_k : int
-        Número de componentes latentes del SVD.
-    lsi_min_docs : int
-        Mínimo de documentos indexados para intentar construir el modelo.
-        Debe ser > lsi_k para que SVD tenga sentido.
+    lsi_rebuild_interval : segundos entre reconstrucciones del modelo LSI.
+    lsi_k                : número de componentes latentes del SVD.
+    lsi_min_docs         : mínimo de documentos indexados para construir el modelo.
 
-    Embedding
-    ---------
-    embed_model : str
-        Nombre del modelo sentence-transformers.
-    embed_batch_size : int
-        Chunks procesados por lote en cada llamada al embedder.
-    embed_poll_interval : float
-        Segundos entre sondeos del watcher de embedding.
-    embed_threshold : int
-        Mínimo de chunks sin embedding para disparar EmbeddingPipeline.
-    embed_rebuild_every : int
-        Chunks añadidos al índice entre reconstrucciones completas de FAISS.
-    embed_nlist : int
-        Celdas Voronoi para IndexIVFPQ.
-    embed_m : int
-        Subvectores PQ (debe dividir a la dimensión del modelo).
-    embed_nbits : int
-        Bits por código PQ.
-    embed_nprobe : int
-        Celdas inspeccionadas durante la búsqueda semántica.
-    faiss_index_path : Path
-        Ruta del archivo .faiss serializado.
-    faiss_id_map_path : Path
-        Ruta del archivo .npy con el mapa posición → chunk_id.
+    Embedding / FAISS
+    -----------------
+    embed_model         : nombre del modelo sentence-transformers.
+    embed_batch_size    : chunks por lote en cada llamada al embedder.
+    embed_poll_interval : segundos entre sondeos del watcher de embedding.
+    embed_threshold     : mínimo de chunks sin embedding para disparar el pipeline.
+    embed_rebuild_every : chunks añadidos entre reconstrucciones completas de FAISS.
+    embed_nlist         : celdas Voronoi para IndexIVFPQ.
+    embed_m             : subvectores PQ (debe dividir la dimensión del modelo).
+    embed_nbits         : bits por código PQ.
+    embed_nprobe        : celdas inspeccionadas durante la búsqueda semántica.
+    faiss_index_path    : ruta del fichero .faiss serializado.
+    faiss_id_map_path   : ruta del fichero .npy con el mapa posición → chunk_id.
+
+    Web Search
+    ----------
+    web_threshold     : score mínimo del retriever LSI para no activar búsqueda web.
+    web_min_docs      : docs mínimos que deben superar web_threshold.
+    web_max_results   : máximo de resultados a pedir a Tavily / DuckDuckGo.
+    web_search_depth  : profundidad de búsqueda Tavily ("basic" | "advanced").
+    web_use_fallback  : usar DuckDuckGo si Tavily falla.
+    web_auto_index    : indexar automáticamente los docs web guardados.
     """
 
     # ── rutas ────────────────────────────────────────────────────────────────
@@ -106,17 +91,20 @@ class OrchestratorConfig:
     download_interval:  float = 30.0
     pdf_interval:       float = 60.0
 
-    # ── indexing watcher ─────────────────────────────────────────────────────
+    # ── indexing (BM25) ──────────────────────────────────────────────────────
     pdf_threshold:       int   = 10
     index_poll_interval: float = 30.0
     index_field:         str   = "full_text"
+    index_batch_size:    int   = 100
+    index_use_stemming:  bool  = False
+    index_min_token_len: int   = 3
 
     # ── LSI rebuild ──────────────────────────────────────────────────────────
     lsi_rebuild_interval: float = 3600.0
     lsi_k:                int   = 100
     lsi_min_docs:         int   = 10
 
-    # ── embedding ────────────────────────────────────────────────────────────
+    # ── embedding / FAISS ────────────────────────────────────────────────────
     embed_model:         str   = "all-MiniLM-L6-v2"
     embed_batch_size:    int   = 256
     embed_poll_interval: float = 60.0
@@ -128,3 +116,11 @@ class OrchestratorConfig:
     embed_nprobe:        int   = 10
     faiss_index_path:    Path  = field(default_factory=lambda: _FAISS_INDEX)
     faiss_id_map_path:   Path  = field(default_factory=lambda: _FAISS_ID_MAP)
+
+    # ── web search ───────────────────────────────────────────────────────────
+    web_threshold:    float = 0.15
+    web_min_docs:     int   = 1
+    web_max_results:  int   = 5
+    web_search_depth: str   = "basic"
+    web_use_fallback: bool  = True
+    web_auto_index:   bool  = True
