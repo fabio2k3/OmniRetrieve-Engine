@@ -3,9 +3,9 @@ chunker.py
 ==========
 Algoritmo centralizado de fragmentación (chunking) de texto.
 
-Extraído de pdf_extractor.py para que sea reutilizable por cualquier
-cliente sin duplicar lógica.  pdf_extractor.py importa desde aquí,
-por lo que el comportamiento existente no cambia.
+Módulo genérico y agnóstico de fuente: no sabe nada de arXiv, PDFs ni HTML.
+Cada cliente (ArxivClient, SemanticScholarClient, etc.) descarga y extrae
+el texto de su fuente, y luego el Crawler lo fragmenta aquí.
 
 API pública
 -----------
@@ -22,7 +22,7 @@ import re
 from typing import List
 
 # ---------------------------------------------------------------------------
-# Constantes (mismos valores que en pdf_extractor.py)
+# Constantes
 # ---------------------------------------------------------------------------
 MIN_CHUNK_CHARS = 100   # chunks más cortos se descartan
 MIN_SENT_CHARS  = 20    # oraciones muy cortas se fusionan con la siguiente

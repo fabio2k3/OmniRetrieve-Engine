@@ -6,7 +6,6 @@ from .chunker import make_chunks
 from .clients.base_client import BaseClient
 from .clients.arxiv_client import ArxivClient
 from .crawler import Crawler, CrawlerConfig
-from .pdf_extractor import download_and_extract
 from .robots import checker as robots_checker
 
 __all__ = [
@@ -21,6 +20,5 @@ __all__ = [
     "CrawlerConfig",
     # Utilidades
     "make_chunks",
-    "download_and_extract",
     "robots_checker",
 ]
