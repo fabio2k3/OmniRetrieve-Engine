@@ -17,3 +17,6 @@ faiss-cpu>=1.7.4          # cambiar a faiss-gpu si hay GPU disponible
 
 # Modulo E: RAG (generacion)
 ollama>=0.3.0
+
+#Testing
+pytest
