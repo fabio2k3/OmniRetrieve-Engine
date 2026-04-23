@@ -1,222 +1,557 @@
 """
-app_advanced.py
-===============
-OmniRetrieve — Interfaz avanzada (modo desarrollador/investigador).
-Muestra todos los controles técnicos y métricas del sistema.
+app.py
+======
+OmniRetrieve — Interfaz de usuario final.
+
+Dos modos:
+  · Search  — devuelve documentos relevantes ordenados por relevancia.
+  · Ask AI  — genera una respuesta en lenguaje natural con fuentes citadas.
+
+Todo lo demás (web search, fallback, indexación) ocurre automáticamente
+por debajo sin que el usuario tenga que configurar nada.
 
 Ejecutar:
-    streamlit run frontend/app_advanced.py
+    streamlit run frontend/app.py
 """
 
 from __future__ import annotations
+
 import time
 import streamlit as st
 
 st.set_page_config(
-    page_title="OmniRetrieve · Advanced",
+    page_title="OmniRetrieve",
     page_icon="⬡",
-    layout="wide",
-    initial_sidebar_state="expanded",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;1,300&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;1,300&display=swap');
 
 :root {
-    --bg:         #0a0a0f;
-    --bg2:        #111118;
-    --bg3:        #1a1a24;
-    --border:     #2a2a38;
-    --accent:     #7c6bff;
-    --accent2:    #ff6b9d;
-    --accent3:    #6bffca;
-    --accent4:    #ffb86b;
-    --text:       #e8e8f0;
-    --text-muted: #6b6b80;
-    --card-bg:    #13131c;
-    --radius:     12px;
+    --bg: #050814;
+    --bg2: #0a1020;
+    --bg3: #111a2e;
+    --card: rgba(14, 20, 38, 0.76);
+    --card-strong: rgba(18, 26, 48, 0.92);
+    --border: rgba(148, 163, 184, 0.16);
+    --border-strong: rgba(47, 128, 255, 0.34);
+
+    --accent: #2f80ff;
+    --accent2: #00d4ff;
+    --accent3: #2ee59d;
+    --accent4: #ffd166;
+
+    --text: #f6f9ff;
+    --text-muted: #9aa7ba;
+    --radius: 18px;
+    --shadow: 0 18px 50px rgba(0, 0, 0, 0.36);
+    --shadow-soft: 0 10px 28px rgba(0, 0, 0, 0.22);
 }
 
-.stApp { background: var(--bg); font-family: 'Syne', sans-serif; color: var(--text); }
+/* ── Fondo con movimiento ── */
+.bg-motion {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.55;
+    background:
+        repeating-linear-gradient(
+            120deg,
+            rgba(255, 255, 255, 0.028) 0px,
+            rgba(255, 255, 255, 0.028) 1px,
+            transparent 1px,
+            transparent 28px
+        ),
+        repeating-linear-gradient(
+            60deg,
+            rgba(255, 255, 255, 0.018) 0px,
+            rgba(255, 255, 255, 0.018) 1px,
+            transparent 1px,
+            transparent 36px
+        );
+    animation: driftLines 22s linear infinite;
+    mask-image: radial-gradient(circle at center, black 35%, transparent 100%);
+    -webkit-mask-image: radial-gradient(circle at center, black 35%, transparent 100%);
+}
+
+@keyframes driftLines {
+    from {
+        transform: translate3d(0, 0, 0);
+    }
+    to {
+        transform: translate3d(-80px, 60px, 0);
+    }
+}
+
+/* ── App base ── */
+.stApp {
+    background:
+        radial-gradient(circle at 14% 18%, rgba(47, 128, 255, 0.18), transparent 26%),
+        radial-gradient(circle at 82% 12%, rgba(0, 212, 255, 0.12), transparent 24%),
+        radial-gradient(circle at 78% 84%, rgba(46, 229, 157, 0.10), transparent 22%),
+        linear-gradient(180deg, #040711 0%, #080d18 50%, #050814 100%);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+}
+
+.stApp::before,
+.stApp::after {
+    content: "";
+    position: fixed;
+    width: 420px;
+    height: 420px;
+    border-radius: 50%;
+    filter: blur(72px);
+    opacity: 0.16;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.stApp::before {
+    top: -120px;
+    right: -140px;
+    background: radial-gradient(circle, rgba(47, 128, 255, 0.95), transparent 68%);
+}
+
+.stApp::after {
+    bottom: -160px;
+    left: -160px;
+    background: radial-gradient(circle, rgba(46, 229, 157, 0.82), transparent 68%);
+}
+
 #MainMenu, footer, header { visibility: hidden; }
-.block-container { padding-top: 2rem; padding-bottom: 2rem; }
+[data-testid="collapsedControl"] { display: none !important; }
 
-[data-testid="stSidebar"] {
-    background: var(--bg2) !important;
-    border-right: 1px solid var(--border) !important;
-}
-
-.omni-header {
-    display: flex; align-items: center; gap: 1rem;
-    margin-bottom: 2rem; padding-bottom: 1.5rem;
-    border-bottom: 1px solid var(--border);
-}
-.omni-logo {
-    width: 48px; height: 48px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    border-radius: 14px; display: flex; align-items: center;
-    justify-content: center; font-size: 1.4rem; flex-shrink: 0;
-}
-.omni-title {
-    font-size: 1.8rem; font-weight: 800; letter-spacing: -0.03em;
-    background: linear-gradient(90deg, var(--text) 0%, var(--accent) 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    background-clip: text; margin: 0; line-height: 1;
-}
-.omni-subtitle {
-    font-family: 'DM Mono', monospace; font-size: 0.7rem;
-    color: var(--text-muted); letter-spacing: 0.12em;
-    text-transform: uppercase; margin-top: 0.25rem;
-}
-.mode-badge {
-    font-family: 'DM Mono', monospace; font-size: 0.65rem;
-    background: rgba(255,184,107,0.15); color: var(--accent4);
-    border: 1px solid rgba(255,184,107,0.3);
-    border-radius: 20px; padding: 0.2rem 0.75rem;
-    text-transform: uppercase; letter-spacing: 0.1em; margin-left: auto;
+.block-container {
+    position: relative;
+    z-index: 1;
+    padding-top: 2.2rem;
+    padding-bottom: 2.8rem;
+    max-width: 940px;
 }
 
-[data-testid="stTextInput"] input {
-    background: var(--bg3) !important; border: 1px solid var(--border) !important;
-    border-radius: var(--radius) !important; color: var(--text) !important;
-    font-family: 'Syne', sans-serif !important; font-size: 1.05rem !important;
-    padding: 1rem 1.25rem !important; transition: border-color 0.2s !important;
-}
-[data-testid="stTextInput"] input:focus {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 3px rgba(124,107,255,0.15) !important;
-}
-[data-testid="stTextInput"] input::placeholder { color: var(--text-muted) !important; }
-[data-testid="stTextInput"] label {
-    color: var(--text-muted) !important; font-family: 'DM Mono', monospace !important;
-    font-size: 0.7rem !important; letter-spacing: 0.1em !important; text-transform: uppercase !important;
+/* ── Hero ── */
+.hero {
+    text-align: center;
+    padding: 1.6rem 1rem 1.1rem;
+    margin-bottom: 0.4rem;
 }
 
+.hero-logo {
+    width: 72px;
+    height: 72px;
+    margin: 0 auto 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 22px;
+    font-size: 1.9rem;
+    color: white;
+    background: linear-gradient(135deg, rgba(47,128,255,1), rgba(0,212,255,1));
+    box-shadow: 0 16px 40px rgba(47, 128, 255, 0.25);
+    border: 1px solid rgba(255,255,255,0.12);
+    position: relative;
+    overflow: hidden;
+}
+
+.hero-logo::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(255,255,255,0.20), transparent 55%);
+    pointer-events: none;
+}
+
+.hero-title {
+    font-size: 2.65rem;
+    font-weight: 800;
+    letter-spacing: -0.05em;
+    line-height: 1;
+    margin-bottom: 0.55rem;
+    background: linear-gradient(90deg, #ffffff 10%, #cfe6ff 35%, #2f80ff 68%, #00d4ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.hero-desc {
+    max-width: 560px;
+    margin: 0 auto;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.82rem;
+    line-height: 1.8;
+    color: var(--text-muted);
+    opacity: 0.95;
+}
+
+/* ── Buttons ── */
 [data-testid="stButton"] > button {
-    background: linear-gradient(135deg, var(--accent), #5a4fcf) !important;
-    color: white !important; border: none !important;
-    border-radius: var(--radius) !important; font-family: 'Syne', sans-serif !important;
-    font-weight: 700 !important; font-size: 0.95rem !important;
-    padding: 0.7rem 2rem !important; transition: all 0.2s !important; width: 100% !important;
+    font-family: 'Syne', sans-serif !important;
+    font-weight: 700 !important;
+    border-radius: 999px !important;
+    border: 1px solid transparent !important;
+    transition: all 0.22s ease !important;
+    font-size: 0.9rem !important;
+    padding: 0.7rem 1.4rem !important;
+    box-shadow: none !important;
 }
+
 [data-testid="stButton"] > button:hover {
     transform: translateY(-1px) !important;
-    box-shadow: 0 8px 25px rgba(124,107,255,0.35) !important;
 }
 
-/* ── Sección de estadísticas del sistema ── */
-.sys-stats-grid {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem;
-    margin-bottom: 1.5rem;
-}
-.sys-stat-card {
-    background: var(--card-bg); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 1rem 1.25rem;
-}
-.sys-stat-value { font-size: 1.25rem; font-weight: 800; color: var(--text); }
-.sys-stat-label {
-    font-family: 'DM Mono', monospace; font-size: 0.62rem;
-    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin-top: 0.2rem;
-}
-.sys-stat-sub {
-    font-family: 'DM Mono', monospace; font-size: 0.65rem;
-    color: var(--accent); margin-top: 0.15rem;
+[data-testid="stButton"] > button:active {
+    transform: translateY(0px) scale(0.99) !important;
 }
 
-/* ── Debug panel ── */
-.debug-panel {
-    background: var(--bg3); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 1rem 1.25rem;
-    margin-top: 1rem; font-family: 'DM Mono', monospace; font-size: 0.75rem;
-    color: var(--text-muted); line-height: 1.8;
-}
-.debug-panel b { color: var(--accent); }
-
-.rag-answer-box {
-    background: linear-gradient(135deg, #13131c, #1a1428);
-    border: 1px solid rgba(124,107,255,0.35);
-    border-radius: var(--radius); padding: 1.5rem 1.75rem;
-    margin-bottom: 1.5rem; position: relative; overflow: hidden;
-}
-.rag-answer-box::before {
-    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
-    background: linear-gradient(180deg, var(--accent), var(--accent2));
-}
-.rag-answer-label {
-    font-family: 'DM Mono', monospace; font-size: 0.65rem;
-    color: var(--accent); text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 0.75rem;
-}
-.rag-answer-text { font-size: 0.97rem; line-height: 1.75; color: var(--text); }
-.rag-sources {
-    margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border);
-    display: flex; flex-wrap: wrap; gap: 0.5rem;
-}
-.rag-source-chip {
-    font-family: 'DM Mono', monospace; font-size: 0.65rem;
-    background: rgba(124,107,255,0.1); color: var(--accent);
-    border: 1px solid rgba(124,107,255,0.25); border-radius: 20px; padding: 0.2rem 0.65rem;
+[data-testid="stButton"] > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--accent), var(--accent2)) !important;
+    color: white !important;
+    box-shadow: 0 12px 24px rgba(47, 128, 255, 0.26) !important;
+    border-color: rgba(255,255,255,0.12) !important;
 }
 
+[data-testid="stButton"] > button[kind="primary"]:hover {
+    box-shadow: 0 16px 30px rgba(0, 212, 255, 0.24) !important;
+}
+
+[data-testid="stButton"] > button[kind="secondary"] {
+    background: rgba(18, 24, 42, 0.84) !important;
+    color: var(--text-muted) !important;
+    border: 1px solid rgba(148, 163, 184, 0.14) !important;
+    backdrop-filter: blur(10px);
+}
+
+[data-testid="stButton"] > button[kind="secondary"]:hover {
+    border-color: rgba(0, 212, 255, 0.35) !important;
+    color: var(--text) !important;
+    background: rgba(22, 29, 50, 0.94) !important;
+}
+
+/* ── Input ── */
+[data-testid="stTextInput"] input {
+    background: rgba(14, 20, 38, 0.88) !important;
+    border: 1px solid rgba(148, 163, 184, 0.16) !important;
+    border-radius: 999px !important;
+    color: var(--text) !important;
+    font-family: 'Syne', sans-serif !important;
+    font-size: 1rem !important;
+    padding: 0.95rem 1.35rem !important;
+    transition: all 0.2s ease !important;
+    backdrop-filter: blur(12px);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+}
+
+[data-testid="stTextInput"] input:hover {
+    border-color: rgba(0, 212, 255, 0.26) !important;
+}
+
+[data-testid="stTextInput"] input:focus {
+    border-color: rgba(47, 128, 255, 0.72) !important;
+    box-shadow: 0 0 0 4px rgba(47, 128, 255, 0.12) !important;
+}
+
+[data-testid="stTextInput"] input::placeholder {
+    color: rgba(154, 167, 186, 0.78) !important;
+}
+
+[data-testid="stTextInput"] label { display: none !important; }
+
+/* ── Search button ── */
+.search-btn > div > div > div > button {
+    background: linear-gradient(135deg, #2f80ff, #00d4ff) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 999px !important;
+    font-family: 'Syne', sans-serif !important;
+    font-weight: 800 !important;
+    font-size: 0.95rem !important;
+    padding: 0.95rem 1.2rem !important;
+    width: 100% !important;
+    box-shadow: 0 12px 24px rgba(47, 128, 255, 0.28) !important;
+}
+
+.search-btn > div > div > div > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 16px 30px rgba(0, 212, 255, 0.28) !important;
+}
+
+/* ── Info bar ── */
+.info-bar {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    padding: 0.75rem 1.1rem;
+    background: rgba(14, 20, 38, 0.74);
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 999px;
+    margin: 1.15rem 0;
+    flex-wrap: wrap;
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(12px);
+}
+
+.info-item {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.info-item b { color: var(--text); }
+
+/* ── Web notice ── */
+.web-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.7rem 1rem;
+    margin: 0.8rem auto 1.15rem;
+    width: fit-content;
+    background: rgba(46, 229, 157, 0.08);
+    border: 1px solid rgba(46, 229, 157, 0.22);
+    border-radius: 999px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.73rem;
+    color: #8ff0c8;
+    box-shadow: 0 10px 22px rgba(0,0,0,0.18);
+    backdrop-filter: blur(12px);
+}
+
+/* ── Answer box ── */
+.answer-box {
+    background: linear-gradient(180deg, rgba(18, 26, 48, 0.94), rgba(13, 17, 31, 0.92));
+    border: 1px solid rgba(47, 128, 255, 0.24);
+    border-radius: 22px;
+    padding: 1.5rem 1.7rem;
+    margin: 1.15rem 0;
+    position: relative;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(12px);
+}
+
+.answer-box::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 5px;
+    background: linear-gradient(180deg, var(--accent), var(--accent3));
+}
+
+.answer-box::after {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    background: radial-gradient(circle at top right, rgba(0,212,255,0.10), transparent 35%);
+    pointer-events: none;
+}
+
+.answer-label {
+    position: relative;
+    z-index: 1;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--accent2);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    margin-bottom: 0.75rem;
+}
+
+.answer-text {
+    position: relative;
+    z-index: 1;
+    font-size: 0.98rem;
+    line-height: 1.85;
+    color: var(--text);
+}
+
+.answer-sources {
+    position: relative;
+    z-index: 1;
+    margin-top: 1rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid rgba(148, 163, 184, 0.12);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    align-items: center;
+}
+
+.sources-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+}
+
+.source-chip {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.63rem;
+    background: rgba(47, 128, 255, 0.12);
+    color: #d6e7ff;
+    border: 1px solid rgba(47, 128, 255, 0.22);
+    border-radius: 999px;
+    padding: 0.2rem 0.65rem;
+    white-space: nowrap;
+}
+
+/* ── Section label ── */
+.section-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    margin: 1.25rem 0 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(148,163,184,0.14), transparent);
+}
+
+/* ── Result cards ── */
 .result-card {
-    background: var(--card-bg); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 1.25rem 1.5rem;
-    margin-bottom: 0.85rem; transition: border-color 0.2s, transform 0.2s;
-    position: relative; overflow: hidden;
+    background: linear-gradient(180deg, rgba(16, 24, 44, 0.88), rgba(12, 16, 30, 0.92));
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: var(--radius);
+    padding: 1.15rem 1.35rem;
+    margin-bottom: 0.85rem;
+    transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.18);
+    backdrop-filter: blur(10px);
 }
+
 .result-card::before {
-    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-    background: linear-gradient(180deg, var(--accent), var(--accent2)); border-radius: 3px 0 0 3px;
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 4px;
+    background: linear-gradient(180deg, var(--accent), var(--accent3));
 }
-.result-card:hover { border-color: var(--accent); transform: translateX(3px); }
-.result-card.web-result::before { background: linear-gradient(180deg, var(--accent3), #4bf0b8); }
-.result-card.rag-source::before { background: linear-gradient(180deg, var(--accent4), #ff8c2a); }
-.result-rank { font-family: 'DM Mono', monospace; font-size: 0.65rem; color: var(--text-muted); letter-spacing: 0.12em; margin-bottom: 0.4rem; }
-.result-title { font-size: 1rem; font-weight: 700; color: var(--text); margin-bottom: 0.5rem; line-height: 1.3; }
-.result-meta { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; align-items: center; }
-.result-score { font-family: 'DM Mono', monospace; font-size: 0.72rem; background: rgba(124,107,255,0.15); color: var(--accent); padding: 0.2rem 0.55rem; border-radius: 20px; border: 1px solid rgba(124,107,255,0.3); }
-.result-score.web  { background: rgba(107,255,202,0.1); color: var(--accent3); border-color: rgba(107,255,202,0.3); }
-.result-score.rag  { background: rgba(255,184,107,0.1); color: var(--accent4); border-color: rgba(255,184,107,0.3); }
-.result-source-badge { font-family: 'DM Mono', monospace; font-size: 0.65rem; padding: 0.2rem 0.5rem; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.08em; }
-.badge-local    { background: rgba(124,107,255,0.1); color: var(--accent);  border: 1px solid rgba(124,107,255,0.2); }
-.badge-web      { background: rgba(107,255,202,0.1); color: var(--accent3); border: 1px solid rgba(107,255,202,0.2); }
-.badge-fallback { background: rgba(255,107,157,0.1); color: var(--accent2); border: 1px solid rgba(255,107,157,0.2); }
-.badge-rag      { background: rgba(255,184,107,0.1); color: var(--accent4); border: 1px solid rgba(255,184,107,0.2); }
-.result-abstract { font-size: 0.85rem; color: var(--text-muted); line-height: 1.6; font-family: 'DM Mono', monospace; font-weight: 300; }
-.result-link { margin-top: 0.75rem; }
-.result-link a { font-family: 'DM Mono', monospace; font-size: 0.72rem; color: var(--accent); text-decoration: none; }
-.result-link a:hover { text-decoration: underline; }
 
-.stats-bar {
-    display: flex; gap: 1.5rem; padding: 0.9rem 1.25rem;
-    background: var(--bg3); border: 1px solid var(--border);
-    border-radius: var(--radius); margin-bottom: 1.5rem; flex-wrap: wrap;
+.result-card:hover {
+    border-color: rgba(47, 128, 255, 0.42);
+    transform: translateY(-2px);
+    box-shadow: 0 16px 32px rgba(0,0,0,0.25);
 }
-.stat-item { display: flex; flex-direction: column; gap: 0.15rem; }
-.stat-value { font-size: 1.1rem; font-weight: 700; color: var(--text); }
-.stat-label { font-family: 'DM Mono', monospace; font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; }
 
-.web-banner { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1.25rem; background: rgba(107,255,202,0.07); border: 1px solid rgba(107,255,202,0.25); border-radius: var(--radius); margin-bottom: 1rem; font-family: 'DM Mono', monospace; font-size: 0.78rem; color: var(--accent3); }
-.rag-banner { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1.25rem; background: rgba(124,107,255,0.07); border: 1px solid rgba(124,107,255,0.25); border-radius: var(--radius); margin-bottom: 1rem; font-family: 'DM Mono', monospace; font-size: 0.78rem; color: var(--accent); }
+.result-card.is-web::before {
+    background: linear-gradient(180deg, var(--accent3), var(--accent2));
+}
 
-.empty-state { text-align: center; padding: 4rem 2rem; color: var(--text-muted); }
-.empty-icon  { font-size: 3rem; margin-bottom: 1rem; opacity: 0.4; }
-.empty-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text-muted); }
-.empty-desc  { font-family: 'DM Mono', monospace; font-size: 0.78rem; color: var(--text-muted); opacity: 0.7; }
+.result-title {
+    font-size: 0.98rem;
+    font-weight: 800;
+    color: var(--text);
+    margin-bottom: 0.45rem;
+    line-height: 1.35;
+}
 
-.section-title { font-size: 0.7rem; font-family: 'DM Mono', monospace; letter-spacing: 0.15em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem; }
-.section-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.result-abstract {
+    font-size: 0.83rem;
+    color: rgba(154, 167, 186, 0.92);
+    line-height: 1.7;
+    font-family: 'DM Mono', monospace;
+    font-weight: 300;
+}
 
-[data-testid="stSlider"] label,
-[data-testid="stSelectbox"] label,
-[data-testid="stNumberInput"] label { font-family: 'DM Mono', monospace !important; font-size: 0.7rem !important; color: var(--text-muted) !important; text-transform: uppercase !important; letter-spacing: 0.1em !important; }
-[data-testid="stCheckbox"] label { font-family: 'DM Mono', monospace !important; font-size: 0.78rem !important; color: var(--text-muted) !important; }
-[data-testid="stSelectbox"] > div > div { background: var(--bg3) !important; border-color: var(--border) !important; color: var(--text) !important; }
-[data-testid="stTabs"] [data-baseweb="tab"] { font-family: 'DM Mono', monospace !important; font-size: 0.75rem !important; color: var(--text-muted) !important; text-transform: uppercase !important; letter-spacing: 0.1em !important; }
-[data-testid="stTabs"] [aria-selected="true"] { color: var(--accent) !important; border-bottom-color: var(--accent) !important; }
-[data-testid="stRadio"] label { font-family: 'DM Mono', monospace !important; font-size: 0.75rem !important; color: var(--text-muted) !important; }
-hr { border-color: var(--border) !important; }
+.result-footer {
+    display: flex;
+    gap: 0.65rem;
+    align-items: center;
+    margin-top: 0.8rem;
+    flex-wrap: wrap;
+}
+
+.result-tag {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    padding: 0.16rem 0.6rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.tag-local {
+    background: rgba(47, 128, 255, 0.12);
+    color: #d6e7ff;
+    border: 1px solid rgba(47, 128, 255, 0.22);
+}
+
+.tag-web {
+    background: rgba(46, 229, 157, 0.1);
+    color: #8ff0c8;
+    border: 1px solid rgba(46, 229, 157, 0.2);
+}
+
+.result-link {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    color: #d6e7ff;
+    text-decoration: none;
+}
+
+.result-link:hover {
+    text-decoration: underline;
+}
+
+/* ── Empty state ── */
+.empty-state {
+    text-align: center;
+    padding: 2.7rem 1rem;
+    background: rgba(14, 20, 38, 0.46);
+    border: 1px dashed rgba(148, 163, 184, 0.2);
+    border-radius: 22px;
+    backdrop-filter: blur(10px);
+}
+
+.empty-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 22px;
+    margin: 0 auto 0.9rem;
+    display: grid;
+    place-items: center;
+    font-size: 2rem;
+    color: #d6e7ff;
+    background: linear-gradient(135deg, rgba(47,128,255,0.18), rgba(46,229,157,0.14));
+    border: 1px solid rgba(47,128,255,0.18);
+    box-shadow: 0 14px 30px rgba(0,0,0,0.18);
+}
+
+.empty-hint {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    line-height: 1.95;
+}
+
+.empty-hint i {
+    color: var(--accent2);
+    font-style: normal;
+}
+
+hr { border-color: rgba(148, 163, 184, 0.14) !important; }
 </style>
+""", unsafe_allow_html=True)
+
+# Fondo animado decorativo
+st.markdown("""
+<div class="bg-motion"></div>
 """, unsafe_allow_html=True)
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
@@ -225,318 +560,264 @@ hr { border-color: var(--border) !important; }
 def load_retriever():
     try:
         from backend.retrieval.lsi_retriever import LSIRetriever
-        r = LSIRetriever(); r.load()
+        r = LSIRetriever()
+        r.load()
         return r, None
     except Exception as e:
         return None, str(e)
+
 
 @st.cache_resource(show_spinner=False)
 def load_rag():
     try:
         from backend.rag.pipeline import RAGPipeline
         ret, err = load_retriever()
-        if err: return None, err
+        if err:
+            return None, err
         return RAGPipeline(retriever=ret), None
     except Exception as e:
         return None, str(e)
 
+
 @st.cache_resource(show_spinner=False)
-def load_web(api_key, threshold, min_docs, max_results, use_fallback, auto_index):
+def load_web():
     try:
         from backend.web_search.pipeline import WebSearchPipeline
-        return WebSearchPipeline(
-            api_key=api_key or None, threshold=threshold, min_docs=min_docs,
-            max_results=max_results, use_fallback=use_fallback, auto_index=auto_index,
-        ), None
+        return WebSearchPipeline(), None
     except Exception as e:
         return None, str(e)
 
-def get_system_stats():
-    """Obtiene estadísticas reales del sistema desde la BD y FAISS."""
-    stats = {
-        "total_docs": "—", "indexed_docs": "—",
-        "vocab_size": "—", "total_chunks": "—",
-        "embedded_chunks": "—", "faiss_vectors": "—",
-        "faiss_type": "—", "lsi_k": "—",
-    }
-    try:
-        from backend.database.schema import get_connection, DB_PATH
-        conn = get_connection(DB_PATH)
-        stats["total_docs"]    = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        stats["indexed_docs"]  = conn.execute("SELECT COUNT(*) FROM documents WHERE pdf_downloaded=1").fetchone()[0]
-        stats["vocab_size"]    = conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0]
-        stats["total_chunks"]  = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        stats["embedded_chunks"] = conn.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL").fetchone()[0]
-        conn.close()
-    except Exception:
-        pass
-    try:
-        from backend.retrieval.lsi_model import LSIModel, MODEL_PATH
-        m = LSIModel(); m.load(MODEL_PATH)
-        stats["lsi_k"]    = m.k
-    except Exception:
-        pass
-    return stats
+# ── Session state ─────────────────────────────────────────────────────────────
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+if "mode" not in st.session_state:
+    st.session_state.mode = "search"
 
-with st.sidebar:
-    st.markdown("""
-    <div style='margin-bottom:1.5rem'>
-        <div style='font-family:"Syne",sans-serif;font-size:1.1rem;font-weight:800;color:#e8e8f0;letter-spacing:-0.02em;margin-bottom:0.25rem'>⬡ OmniRetrieve</div>
-        <div style='font-family:"DM Mono",monospace;font-size:0.6rem;color:#ffb86b;text-transform:uppercase;letter-spacing:0.12em'>Advanced · Developer Mode</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown('<div class="section-title">Search Mode</div>', unsafe_allow_html=True)
-    search_mode = st.radio("Mode", ["Search", "Ask (RAG)"], index=0, label_visibility="collapsed")
-
-    st.markdown('<div class="section-title" style="margin-top:1.25rem">Retrieval — LSI</div>', unsafe_allow_html=True)
-    top_n = st.slider("Top-N results", 1, 20, 10)
-    candidate_k = max_chunks = max_chars = None
-    if search_mode == "Ask (RAG)":
-        candidate_k = st.slider("Candidate pool (reranking)", 10, 100, 50)
-        max_chunks  = st.slider("Max chunks in context", 1, 10, 5)
-        max_chars   = st.slider("Max chars per chunk", 100, 800, 400)
-        show_debug  = st.checkbox("Show debug info (context + prompt)", value=False)
-    else:
-        show_debug = False
-
-    st.markdown('<div class="section-title" style="margin-top:1.25rem">Web Search</div>', unsafe_allow_html=True)
-    enable_web   = st.checkbox("Enable web search", value=True)
-    threshold    = st.slider("Score threshold", 0.0, 1.0, 0.15, 0.01, help="Minimum cosine similarity to consider results sufficient")
-    min_docs_val = st.slider("Min docs above threshold", 1, 5, 1)
-    max_web      = st.slider("Max web results", 1, 10, 5)
-    search_depth = st.selectbox("Search depth", ["basic", "advanced"], index=0)
-    use_fallback = st.checkbox("DuckDuckGo fallback", value=True)
-    auto_index   = st.checkbox("Auto-index web docs", value=True)
-
-    st.markdown('<div class="section-title" style="margin-top:1.25rem">API Key</div>', unsafe_allow_html=True)
-    api_key_input = st.text_input("Tavily API Key", type="password", placeholder="tvly-... (or set in .env)", label_visibility="visible")
-
-    st.markdown("---")
-    st.markdown("""
-    <div style='font-family:"DM Mono",monospace;font-size:0.65rem;color:#6b6b80;line-height:2'>
-    <b style='color:#e8e8f0'>Active modules</b><br>
-    ⬡ LSI Retriever<br>⬡ Web Search (Tavily)<br>
-    ⬡ Fallback (DuckDuckGo)<br>⬡ RAG Pipeline<br>⬡ Auto-indexing
-    </div>
-    """, unsafe_allow_html=True)
-
-# ── Header ────────────────────────────────────────────────────────────────────
+# ── Hero ──────────────────────────────────────────────────────────────────────
 
 st.markdown("""
-<div class="omni-header">
-    <div class="omni-logo">⬡</div>
-    <div>
-        <div class="omni-title">OmniRetrieve</div>
-        <div class="omni-subtitle">Semantic IR · LSI + RAG + Web Search</div>
+<div class="hero">
+    <div class="hero-logo">⬡</div>
+    <div class="hero-title">OmniRetrieve</div>
+    <div class="hero-desc">
+        Search across AI &amp; Ethics research papers.<br>
+        Ask questions and get intelligent answers.
     </div>
-    <div class="mode-badge">⬡ Advanced Mode</div>
 </div>
 """, unsafe_allow_html=True)
 
-# ── System stats ──────────────────────────────────────────────────────────────
+# ── Mode toggle ───────────────────────────────────────────────────────────────
 
-with st.expander("⬡  System Statistics", expanded=False):
-    sys = get_system_stats()
-    st.markdown(f"""
-    <div class="sys-stats-grid">
-        <div class="sys-stat-card">
-            <div class="sys-stat-value">{sys['total_docs']}</div>
-            <div class="sys-stat-label">Total documents</div>
-            <div class="sys-stat-sub">{sys['indexed_docs']} with full text</div>
-        </div>
-        <div class="sys-stat-card">
-            <div class="sys-stat-value">{sys['vocab_size']}</div>
-            <div class="sys-stat-label">Vocabulary size</div>
-            <div class="sys-stat-sub">unique terms indexed</div>
-        </div>
-        <div class="sys-stat-card">
-            <div class="sys-stat-value">{sys['total_chunks']}</div>
-            <div class="sys-stat-label">Total chunks</div>
-            <div class="sys-stat-sub">{sys['embedded_chunks']} embedded</div>
-        </div>
-        <div class="sys-stat-card">
-            <div class="sys-stat-value">{sys['lsi_k']}</div>
-            <div class="sys-stat-label">LSI components (k)</div>
-            <div class="sys-stat-sub">latent dimensions</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+col_l, col_search, col_ask, col_r = st.columns([2, 1, 1, 2])
 
-# ── Search bar ────────────────────────────────────────────────────────────────
+with col_search:
+    if st.button(
+        "🔍  Search",
+        use_container_width=True,
+        type="primary" if st.session_state.mode == "search" else "secondary",
+        key="btn_search",
+    ):
+        st.session_state.mode = "search"
+        st.rerun()
 
-col_input, col_btn = st.columns([5, 1])
-with col_input:
-    query = st.text_input(
-        "QUERY",
-        placeholder="e.g. What are the main challenges of AI fairness?" if search_mode == "Ask (RAG)" else "e.g. fairness in machine learning, bias detection NLP…",
-        label_visibility="visible",
-    )
+with col_ask:
+    if st.button(
+        "💬  Ask AI",
+        use_container_width=True,
+        type="primary" if st.session_state.mode == "ask" else "secondary",
+        key="btn_ask",
+    ):
+        st.session_state.mode = "ask"
+        st.rerun()
+
+mode = st.session_state.mode
+
+# ── Search input ──────────────────────────────────────────────────────────────
+
+st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
+
+placeholder = (
+    "Ask anything about AI & Ethics research…"
+    if mode == "ask"
+    else "Search papers on fairness, bias, transparency…"
+)
+
+col_q, col_btn = st.columns([5, 1])
+with col_q:
+    query = st.text_input("q", placeholder=placeholder, label_visibility="collapsed")
 with col_btn:
-    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-    search_clicked = st.button("Ask →" if search_mode == "Ask (RAG)" else "Search →", use_container_width=True)
+    clicked = st.button(
+        "Ask →" if mode == "ask" else "Go →",
+        use_container_width=True,
+        type="primary",
+        key="btn_go",
+    )
 
-# ── Render helpers ─────────────────────────────────────────────────────────────
+st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-def render_card(r, rank, score_cls="result-score", card_cls="result-card"):
-    source = r.get("source", "local")
-    badge_map = {
-        "web":          '<span class="result-source-badge badge-web">web · tavily</span>',
-        "web_fallback": '<span class="result-source-badge badge-fallback">web · duckduckgo</span>',
-        "rag":          '<span class="result-source-badge badge-rag">rag · source</span>',
-    }
-    badge   = badge_map.get(source, '<span class="result-source-badge badge-local">local · lsi</span>')
-    url     = r.get("url") or r.get("pdf_url","")
-    url_html = f'<div class="result-link"><a href="{url}" target="_blank">↗ {url[:65]}{"…" if len(url)>65 else ""}</a></div>' if url else ""
-    abstract = (r.get("abstract") or r.get("text",""))[:280]
-    arxiv_tag = f'<span style="font-family:\'DM Mono\',monospace;font-size:0.65rem;color:var(--text-muted)">{r.get("arxiv_id","")}</span>' if r.get("arxiv_id") else ""
+# ── Render helpers ────────────────────────────────────────────────────────────
+
+def render_result(r: dict) -> None:
+    src = r.get("source", "local")
+    is_web = src in ("web", "web_fallback")
+    card_cls = "result-card is-web" if is_web else "result-card"
+    tag = '<span class="result-tag tag-web">Web</span>' if is_web else '<span class="result-tag tag-local">Research paper</span>'
+    url = r.get("url") or r.get("pdf_url", "")
+    link = f'<a class="result-link" href="{url}" target="_blank">↗ Read paper</a>' if url else ""
+    abstract = (r.get("abstract") or r.get("text", ""))[:220]
+    if abstract:
+        abstract += "…"
     st.markdown(f"""
     <div class="{card_cls}">
-        <div class="result-rank">#{rank:02d}</div>
-        <div class="result-title">{r.get('title','Untitled')}</div>
-        <div class="result-meta">
-            <span class="{score_cls}">score {r.get('score',0.0):.4f}</span>
-            {badge} {arxiv_tag}
-        </div>
-        <div class="result-abstract">{(abstract+"…") if abstract else "No abstract available."}</div>
-        {url_html}
+        <div class="result-title">{r.get('title', 'Untitled')}</div>
+        <div class="result-abstract">{abstract or 'No description available.'}</div>
+        <div class="result-footer">{tag}{link}</div>
     </div>
     """, unsafe_allow_html=True)
 
-def render_list(items):
-    if not items:
-        st.markdown('<div class="empty-state"><div class="empty-icon">⬡</div><div class="empty-title">No results</div></div>', unsafe_allow_html=True)
-        return
-    for i, r in enumerate(items, 1):
-        src = r.get("source","local")
-        is_web = src in ("web","web_fallback")
-        render_card(r, i, "result-score web" if is_web else "result-score", "result-card web-result" if is_web else "result-card")
+# ── Main logic ────────────────────────────────────────────────────────────────
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-if search_clicked and query.strip():
+if clicked and query.strip():
     t0 = time.monotonic()
 
-    if search_mode == "Ask (RAG)":
-        with st.spinner("Loading RAG pipeline…"):
-            rag, err = load_rag()
-        if err:
-            st.error(f"RAG error: {err}"); st.stop()
-
-        with st.spinner("Retrieving, reranking and generating answer…"):
-            try:
-                out = rag.ask(
-                    query=query.strip(), top_k=top_n,
-                    candidate_k=candidate_k or 50,
-                    max_chunks=max_chunks or 5,
-                    max_chars=max_chars or 400,
-                    include_debug=show_debug,
-                )
-            except Exception as e:
-                st.error(f"RAG error: {e}"); st.stop()
-
-        elapsed = (time.monotonic() - t0) * 1000
-        sources = out.get("sources", [])
-
-        st.markdown(f"""
-        <div class="stats-bar">
-            <div class="stat-item"><span class="stat-value">{len(sources)}</span><span class="stat-label">Sources used</span></div>
-            <div class="stat-item"><span class="stat-value">{candidate_k}</span><span class="stat-label">Candidate pool</span></div>
-            <div class="stat-item"><span class="stat-value">{max_chunks}</span><span class="stat-label">Chunks in context</span></div>
-            <div class="stat-item"><span class="stat-value">{elapsed:.0f}ms</span><span class="stat-label">Response time</span></div>
-            <div class="stat-item"><span class="stat-value">LSI+RAG</span><span class="stat-label">Pipeline</span></div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown('<div class="rag-banner">⬡ &nbsp; RAG pipeline — retrieval · reranking · generation</div>', unsafe_allow_html=True)
-
-        chips = "".join(f'<span class="rag-source-chip">⬡ {s.get("title",s.get("arxiv_id","src"))[:40]}</span>' for s in sources)
-        st.markdown(f"""
-        <div class="rag-answer-box">
-            <div class="rag-answer-label">⬡ &nbsp; Generated Answer</div>
-            <div class="rag-answer-text">{out.get("answer","No answer generated.")}</div>
-            <div class="rag-sources">{chips}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if show_debug and "context" in out:
-            st.markdown('<div class="section-title">Debug — Context passed to LLM</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="debug-panel">{out["context"][:2000]}…</div>', unsafe_allow_html=True)
-
-        if sources:
-            st.markdown('<div class="section-title">Sources</div>', unsafe_allow_html=True)
-            for i, s in enumerate(sources, 1):
-                s["source"] = "rag"
-                render_card(s, i, "result-score rag", "result-card rag-source")
-
-    else:
-        with st.spinner("Loading LSI model…"):
-            retriever, err_ret = load_retriever()
-        if err_ret:
-            st.error(f"Retriever error: {err_ret}"); st.stop()
-
+    # ════════════════════════════════════════
+    # SEARCH
+    # ════════════════════════════════════════
+    if mode == "search":
         with st.spinner("Searching…"):
+            retriever, err = load_retriever()
+            if err:
+                st.error("Search is currently unavailable. Please try again later.")
+                st.stop()
             try:
-                local_results = retriever.retrieve(query.strip(), top_n=top_n)
+                local_results = retriever.retrieve(query.strip(), top_n=10)
             except Exception as e:
-                st.error(f"Retrieval error: {e}"); st.stop()
+                st.error(f"Search error: {e}")
+                st.stop()
 
-        output = {"results": local_results, "web_activated": False, "web_results": [], "reason": "", "indexed": 0}
-
-        if enable_web:
-            with st.spinner("Web search check…"):
-                try:
-                    pipeline, err_pip = load_web(
-                        api_key=api_key_input.strip() or None,
-                        threshold=threshold, min_docs=min_docs_val,
-                        max_results=max_web, use_fallback=use_fallback, auto_index=auto_index,
-                    )
-                    if err_pip:
-                        st.warning(f"Web search unavailable: {err_pip}")
-                    else:
-                        output = pipeline.run(query.strip(), local_results)
-                except Exception as e:
-                    st.warning(f"Web search failed: {e}")
+        # Web search automático — invisible para el usuario
+        output = {
+            "results": local_results,
+            "web_activated": False,
+            "web_results": [],
+        }
+        try:
+            pipeline, _ = load_web()
+            if pipeline:
+                output = pipeline.run(query.strip(), local_results)
+        except Exception:
+            pass  # fallback silencioso a resultados locales
 
         elapsed = (time.monotonic() - t0) * 1000
         results = output["results"]
-        local_n = sum(1 for r in results if r.get("source","local") == "local")
-        web_n   = len(results) - local_n
 
+        # Info bar minimalista
         st.markdown(f"""
-        <div class="stats-bar">
-            <div class="stat-item"><span class="stat-value">{len(results)}</span><span class="stat-label">Total results</span></div>
-            <div class="stat-item"><span class="stat-value">{local_n}</span><span class="stat-label">Local (LSI)</span></div>
-            <div class="stat-item"><span class="stat-value">{web_n}</span><span class="stat-label">Web</span></div>
-            <div class="stat-item"><span class="stat-value">{elapsed:.0f}ms</span><span class="stat-label">Response time</span></div>
-            <div class="stat-item"><span class="stat-value">{output.get('indexed',0)}</span><span class="stat-label">Indexed</span></div>
-            <div class="stat-item"><span class="stat-value">{"✓" if output["web_activated"] else "—"}</span><span class="stat-label">Web activated</span></div>
+        <div class="info-bar">
+            <div class="info-item"><b>{len(results)}</b> results</div>
+            <div class="info-item"><b>{elapsed:.0f}ms</b></div>
+            {"<div class='info-item'>⬡ <b>Web sources included</b></div>" if output["web_activated"] else ""}
         </div>
         """, unsafe_allow_html=True)
 
-        if output["web_activated"]:
-            st.markdown(f'<div class="web-banner">⬡ &nbsp; Web search activated — {output.get("reason","")}</div>', unsafe_allow_html=True)
+        if results:
+            st.markdown('<div class="section-label">Results</div>', unsafe_allow_html=True)
+            for r in results:
+                render_result(r)
+        else:
+            st.markdown("""
+            <div class="empty-state">
+                <div class="empty-icon">⬡</div>
+                <div class="empty-hint">
+                    No results found.<br>
+                    Try different keywords or switch to <i>Ask AI</i> mode.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        tab_all, tab_local, tab_web = st.tabs([f"ALL ({len(results)})", f"LOCAL ({local_n})", f"WEB ({web_n})"])
-        with tab_all:
-            st.markdown('<div class="section-title">All results</div>', unsafe_allow_html=True)
-            render_list(results)
-        with tab_local:
-            st.markdown('<div class="section-title">Local documents (LSI)</div>', unsafe_allow_html=True)
-            render_list([r for r in results if r.get("source","local") == "local"])
-        with tab_web:
-            st.markdown('<div class="section-title">Web documents</div>', unsafe_allow_html=True)
-            render_list([r for r in results if r.get("source","local") != "local"])
+    # ════════════════════════════════════════
+    # ASK AI
+    # ════════════════════════════════════════
+    else:
+        with st.spinner("Thinking…"):
+            rag, err = load_rag()
+            if err:
+                st.error("AI assistant is currently unavailable. Try Search mode instead.")
+                st.stop()
+            try:
+                out = rag.ask(
+                    query=query.strip(),
+                    top_k=10,
+                    candidate_k=50,
+                    max_chunks=5,
+                    max_chars=400,
+                )
+            except Exception as e:
+                st.error(f"Something went wrong: {e}")
+                st.stop()
 
-elif search_clicked:
+        # Web search automático sobre los resultados del RAG
+        sources = out.get("sources", [])
+        web_activated = False
+        web_extra: list[dict] = []
+        try:
+            pipeline, _ = load_web()
+            if pipeline:
+                web_out = pipeline.run(query.strip(), sources)
+                web_activated = web_out.get("web_activated", False)
+                web_extra = web_out.get("web_results", [])
+        except Exception:
+            pass
+
+        elapsed = (time.monotonic() - t0) * 1000
+
+        # Aviso web discreto
+        if web_activated:
+            st.markdown("""
+            <div class="web-notice">
+                ⬡ &nbsp; Web sources included for a more complete answer
+            </div>
+            """, unsafe_allow_html=True)
+
+        chips = "".join(
+            f'<span class="source-chip">{s.get("title", s.get("arxiv_id", "Source"))[:48]}</span>'
+            for s in sources
+        )
+        fallback_sources = (
+            '<span style="font-family:DM Mono, monospace; '
+            'font-size:0.7rem; color:var(--text-muted)">No sources available</span>'
+        )
+        sources_html = chips if chips else fallback_sources
+
+        st.markdown(f"""
+        <div class="answer-box">
+            <div class="answer-label">⬡ &nbsp; Answer</div>
+            <div class="answer-text">{out.get("answer", "I couldn't generate an answer. Please try rephrasing.")}</div>
+            <div class="answer-sources">
+                <span class="sources-label">Sources &nbsp;</span>
+                {sources_html}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Documentos fuente + web extras
+        all_docs = sources + web_extra
+        if all_docs:
+            st.markdown('<div class="section-label">Related papers</div>', unsafe_allow_html=True)
+            for r in all_docs[:8]:
+                render_result(r)
+
+elif clicked and not query.strip():
     st.warning("Please enter a query.")
+
+# ── Estado inicial ─────────────────────────────────────────────────────────────
 else:
     st.markdown("""
     <div class="empty-state">
         <div class="empty-icon">⬡</div>
-        <div class="empty-title">Developer mode — full control</div>
-        <div class="empty-desc">Adjust all parameters from the sidebar.<br>Switch to <b>Ask</b> for RAG with debug output.</div>
+        <div class="empty-hint">
+            Try searching for:<br><br>
+            <i>fairness in machine learning</i> &nbsp;·&nbsp; <i>bias in NLP models</i><br>
+            <i>AI transparency and accountability</i> &nbsp;·&nbsp; <i>explainability methods</i>
+        </div>
     </div>
     """, unsafe_allow_html=True)
