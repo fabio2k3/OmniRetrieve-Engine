@@ -1,6 +1,6 @@
 """
-app.py
-======
+app_advanced.py
+===============
 OmniRetrieve — Interfaz de usuario final.
 
 Dos modos:
@@ -10,15 +10,28 @@ Dos modos:
 Todo lo demás (web search, fallback, indexación) ocurre automáticamente
 por debajo sin que el usuario tenga que configurar nada.
 
-Ejecutar:
-    streamlit run frontend/app.py
+Ejecutar (desde la raíz del proyecto):
+    streamlit run frontend/app_advanced.py
 """
 
 from __future__ import annotations
 
+# ── Path fix: permite ejecutar desde cualquier directorio ─────────────────────
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 import streamlit as st
 
+# ── DB init (idempotente — seguro llamar siempre) ─────────────────────────────
+from backend.main import setup as _db_setup
+try:
+    _db_setup(verbose=False)
+except Exception:
+    pass  # si la BD no está disponible la app lo manejará por módulo
+
+# ── Configuración de página ───────────────────────────────────────────────────
 st.set_page_config(
     page_title="OmniRetrieve",
     page_icon="⬡",
@@ -80,12 +93,8 @@ st.markdown("""
 }
 
 @keyframes driftLines {
-    from {
-        transform: translate3d(0, 0, 0);
-    }
-    to {
-        transform: translate3d(-80px, 60px, 0);
-    }
+    from { transform: translate3d(0, 0, 0); }
+    to   { transform: translate3d(-80px, 60px, 0); }
 }
 
 /* ── App base ── */
@@ -505,9 +514,7 @@ st.markdown("""
     text-decoration: none;
 }
 
-.result-link:hover {
-    text-decoration: underline;
-}
+.result-link:hover { text-decoration: underline; }
 
 /* ── Empty state ── */
 .empty-state {
@@ -550,25 +557,36 @@ hr { border-color: rgba(148, 163, 184, 0.14) !important; }
 """, unsafe_allow_html=True)
 
 # Fondo animado decorativo
-st.markdown("""
-<div class="bg-motion"></div>
-""", unsafe_allow_html=True)
+st.markdown('<div class="bg-motion"></div>', unsafe_allow_html=True)
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
 def load_retriever():
+    """
+    Carga el LSIRetriever con rutas por defecto.
+    Devuelve (retriever, None) si OK, (None, mensaje_error) si falla.
+    """
     try:
         from backend.retrieval.lsi_retriever import LSIRetriever
         r = LSIRetriever()
-        r.load()
+        r.load()          # usa MODEL_PATH y DB_PATH por defecto de lsi_retriever.py
         return r, None
+    except FileNotFoundError:
+        return None, (
+            "El modelo LSI no existe todavía. "
+            "Ejecuta el crawler y luego: python -m backend.retrieval.build_lsi"
+        )
     except Exception as e:
         return None, str(e)
 
 
 @st.cache_resource(show_spinner=False)
 def load_rag():
+    """
+    Carga el RAGPipeline inyectando el LSIRetriever ya cacheado.
+    Devuelve (pipeline, None) si OK, (None, mensaje_error) si falla.
+    """
     try:
         from backend.rag.pipeline import RAGPipeline
         ret, err = load_retriever()
@@ -581,11 +599,17 @@ def load_rag():
 
 @st.cache_resource(show_spinner=False)
 def load_web():
+    """
+    Carga el WebSearchPipeline (lee TAVILY_API_KEY del .env automáticamente).
+    Si no hay API key ni duckduckgo disponible devuelve (None, error) y la app
+    continúa sin búsqueda web — no es un error crítico.
+    """
     try:
         from backend.web_search.pipeline import WebSearchPipeline
         return WebSearchPipeline(), None
     except Exception as e:
         return None, str(e)
+
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
@@ -654,18 +678,48 @@ with col_btn:
 
 st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-# ── Render helpers ────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _normalize_result(r) -> dict:
+    """
+    Garantiza que cualquier resultado (dict o dataclass) sea un dict
+    plano con las claves que espera render_result().
+    Cubre los tres casos posibles:
+      - dict estándar del LSIRetriever  → pass-through
+      - dict de build_sources() del RAG → añade claves faltantes
+      - objeto con atributos            → convierte a dict
+    """
+    if not isinstance(r, dict):
+        # Por si algún retriever devuelve un dataclass en el futuro
+        r = vars(r) if hasattr(r, "__dict__") else {}
+
+    return {
+        "title":    r.get("title") or r.get("document_title") or r.get("arxiv_id", "Untitled"),
+        "abstract": r.get("abstract") or r.get("text", ""),
+        "url":      r.get("url") or r.get("pdf_url", ""),
+        "source":   r.get("source", "local"),
+        # conservamos score para el pipeline web
+        "score":    r.get("score", 0.0),
+    }
+
 
 def render_result(r: dict) -> None:
-    src = r.get("source", "local")
+    """Renderiza una tarjeta de resultado (local o web)."""
+    src    = r.get("source", "local")
     is_web = src in ("web", "web_fallback")
     card_cls = "result-card is-web" if is_web else "result-card"
-    tag = '<span class="result-tag tag-web">Web</span>' if is_web else '<span class="result-tag tag-local">Research paper</span>'
-    url = r.get("url") or r.get("pdf_url", "")
+    tag = (
+        '<span class="result-tag tag-web">Web</span>'
+        if is_web else
+        '<span class="result-tag tag-local">Research paper</span>'
+    )
+    url  = r.get("url") or r.get("pdf_url", "")
     link = f'<a class="result-link" href="{url}" target="_blank">↗ Read paper</a>' if url else ""
+
     abstract = (r.get("abstract") or r.get("text", ""))[:220]
     if abstract:
         abstract += "…"
+
     st.markdown(f"""
     <div class="{card_cls}">
         <div class="result-title">{r.get('title', 'Untitled')}</div>
@@ -673,6 +727,7 @@ def render_result(r: dict) -> None:
         <div class="result-footer">{tag}{link}</div>
     </div>
     """, unsafe_allow_html=True)
+
 
 # ── Main logic ────────────────────────────────────────────────────────────────
 
@@ -686,7 +741,7 @@ if clicked and query.strip():
         with st.spinner("Searching…"):
             retriever, err = load_retriever()
             if err:
-                st.error("Search is currently unavailable. Please try again later.")
+                st.error(f"⚠️ Search unavailable: {err}")
                 st.stop()
             try:
                 local_results = retriever.retrieve(query.strip(), top_n=10)
@@ -696,9 +751,9 @@ if clicked and query.strip():
 
         # Web search automático — invisible para el usuario
         output = {
-            "results": local_results,
+            "results":       local_results,
             "web_activated": False,
-            "web_results": [],
+            "web_results":   [],
         }
         try:
             pipeline, _ = load_web()
@@ -710,7 +765,7 @@ if clicked and query.strip():
         elapsed = (time.monotonic() - t0) * 1000
         results = output["results"]
 
-        # Info bar minimalista
+        # Info bar
         st.markdown(f"""
         <div class="info-bar">
             <div class="info-item"><b>{len(results)}</b> results</div>
@@ -722,7 +777,7 @@ if clicked and query.strip():
         if results:
             st.markdown('<div class="section-label">Results</div>', unsafe_allow_html=True)
             for r in results:
-                render_result(r)
+                render_result(_normalize_result(r))
         else:
             st.markdown("""
             <div class="empty-state">
@@ -741,7 +796,7 @@ if clicked and query.strip():
         with st.spinner("Thinking…"):
             rag, err = load_rag()
             if err:
-                st.error("AI assistant is currently unavailable. Try Search mode instead.")
+                st.error(f"⚠️ AI assistant unavailable: {err}")
                 st.stop()
             try:
                 out = rag.ask(
@@ -756,15 +811,20 @@ if clicked and query.strip():
                 st.stop()
 
         # Web search automático sobre los resultados del RAG
+        # `sources` viene de build_sources() → lista de dicts con title, arxiv_id, score, etc.
         sources = out.get("sources", [])
         web_activated = False
         web_extra: list[dict] = []
+
         try:
             pipeline, _ = load_web()
             if pipeline:
-                web_out = pipeline.run(query.strip(), sources)
+                # Normalizamos sources antes de pasarlos al pipeline web
+                # para que SufficiencyChecker pueda leer el campo "score"
+                normalized_sources = [_normalize_result(s) for s in sources]
+                web_out       = pipeline.run(query.strip(), normalized_sources)
                 web_activated = web_out.get("web_activated", False)
-                web_extra = web_out.get("web_results", [])
+                web_extra     = web_out.get("web_results", [])
         except Exception:
             pass
 
@@ -778,6 +838,7 @@ if clicked and query.strip():
             </div>
             """, unsafe_allow_html=True)
 
+        # Chips de fuentes
         chips = "".join(
             f'<span class="source-chip">{s.get("title", s.get("arxiv_id", "Source"))[:48]}</span>'
             for s in sources
@@ -800,7 +861,8 @@ if clicked and query.strip():
         """, unsafe_allow_html=True)
 
         # Documentos fuente + web extras
-        all_docs = sources + web_extra
+        # Normalizamos cada source para que render_result siempre reciba un dict completo
+        all_docs = [_normalize_result(s) for s in sources] + web_extra
         if all_docs:
             st.markdown('<div class="section-label">Related papers</div>', unsafe_allow_html=True)
             for r in all_docs[:8]:
