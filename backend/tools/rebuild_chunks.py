@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 
 from backend.database.schema import DB_PATH, get_connection
 from backend.database.chunk_repository import save_chunks, get_chunk_stats
-from backend.crawler.pdf_extractor import _split_into_chunks
+from backend.crawler.chunker import _split_into_chunks
 
 # ── Colores ANSI ──────────────────────────────────────────────────────────────
 BOLD   = "\033[1m"
