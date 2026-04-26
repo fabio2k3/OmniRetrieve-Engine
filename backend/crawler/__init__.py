@@ -1,26 +1,25 @@
 """backend/crawler — adquisición y fragmentación de documentos."""
-
 from .document import Document
 from .id_store import IdStore
-from .chunker import make_chunks
+from .chunker  import make_chunks
+from .config   import CrawlerConfig
+from .crawler  import Crawler
+from .robots   import checker as robots_checker
 from .clients.base_client import BaseClient
-from .clients.arxiv_client import ArxivClient
-from .crawler import Crawler, CrawlerConfig
-from .pdf_extractor import download_and_extract
-from .robots import checker as robots_checker
+from .clients.arxiv       import ArxivClient
 
 __all__ = [
     # Modelo de datos
     "Document",
     "IdStore",
+    # Configuración
+    "CrawlerConfig",
     # Clientes
     "BaseClient",
     "ArxivClient",
-    # Crawler
+    # Orquestador
     "Crawler",
-    "CrawlerConfig",
     # Utilidades
     "make_chunks",
-    "download_and_extract",
     "robots_checker",
 ]
