@@ -19,7 +19,7 @@ from typing import Any
 from backend.database.chunk_repository import get_chunks_by_ids
 from backend.database.schema import DB_PATH
 from backend.embedding.embedder import DEFAULT_MODEL
-from backend.embedding.faiss_index import FaissIndexManager
+from backend.embedding import FaissIndexManager
 from .protocols import RetrievalResult, RetrieverProtocol
 
 log = logging.getLogger(__name__)
