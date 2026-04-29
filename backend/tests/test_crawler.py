@@ -1,5 +1,5 @@
 """
-test_crawler_new.py
+test_crawler.py
 ===================
 Suite de tests para el crawler refactorizado.
 
@@ -559,12 +559,12 @@ class TestArxivClient:
     # -- Politica de crawling -------------------------------------------------
 
     def test_source_name(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         assert ArxivClient().source_name == "arxiv"
 
     def test_request_delay_is_at_least_15_seconds(self):
         """request_delay debe ser >= 15s (Crawl-delay del robots.txt de arXiv)."""
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         c = ArxivClient()
         assert isinstance(c.request_delay, float)
         assert c.request_delay >= 15.0, (
@@ -573,7 +573,7 @@ class TestArxivClient:
 
     def test_trusted_domains_contains_arxiv_hosts(self):
         """trusted_domains debe incluir los dos hosts de arXiv."""
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         td = ArxivClient().trusted_domains
         assert isinstance(td, frozenset)
         assert "arxiv.org" in td
@@ -581,7 +581,7 @@ class TestArxivClient:
 
     def test_effective_delay_respects_robots_txt(self):
         """max(request_delay, crawl_delay_robots) >= 15s para todos los hosts de arXiv."""
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         from backend.crawler.robots import RobotsChecker
         import urllib.robotparser, time
 
@@ -600,7 +600,7 @@ class TestArxivClient:
     def test_allowed_uses_trusted_domains(self):
         """allowed() con trusted_domains del cliente resuelve el Disallow: /api."""
         from backend.crawler.robots import RobotsChecker
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         import urllib.robotparser, time
 
         c = ArxivClient()
@@ -615,7 +615,7 @@ class TestArxivClient:
     def test_crawl_delay_not_bypassed_by_trusted_domains(self):
         """crawl_delay() lee robots.txt incluso para dominios trusted."""
         from backend.crawler.robots import RobotsChecker
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         import urllib.robotparser, time
 
         c = ArxivClient()
@@ -631,11 +631,11 @@ class TestArxivClient:
     # -- Parseo XML -----------------------------------------------------------
 
     def test_make_doc_id(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         assert ArxivClient().make_doc_id("2301.12345") == "arxiv:2301.12345"
 
     def test_parse_ids_strips_version(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         ns = self.ATOM_NS
         xml = f"""<feed xmlns="{ns}">
           <entry><id>https://arxiv.org/abs/2301.00001v3</id></entry>
@@ -644,20 +644,20 @@ class TestArxivClient:
         assert ArxivClient()._parse_ids(xml) == ["2301.00001", "2302.99999"]
 
     def test_entry_to_document_produces_composite_doc_id(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         doc = ArxivClient()._entry_to_document(self._make_entry())
         assert doc is not None
         assert doc.doc_id == "arxiv:2301.12345"
         assert doc.arxiv_id == "arxiv:2301.12345"
 
     def test_entry_without_id_returns_none(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         ns = self.ATOM_NS
         entry = ET.fromstring(f'<entry xmlns="{ns}"><title>No ID</title></entry>')
         assert ArxivClient()._entry_to_document(entry) is None
 
     def test_fetch_documents_groups_into_chunks_of_20(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         client = ArxivClient()
         sizes = []
         client._fetch_chunk = lambda ids: (sizes.append(len(ids)) or [])
@@ -669,7 +669,7 @@ class TestArxivClient:
         3 hilos comparten 1 instancia: las peticiones salen serializadas
         con al menos request_delay entre cada una.
         """
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         import threading, time
 
         # Subclase con delay corto para el test
@@ -707,7 +707,7 @@ class TestArxivClient:
         2 instancias distintas de ArxivClient comparten el mismo rate-limiter
         porque _rate_lock y _last_request son variables de clase.
         """
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         import threading, time
 
         class FastClient(ArxivClient):
@@ -751,7 +751,7 @@ class TestArxivClient:
 
     @pytest.mark.network
     def test_fetch_ids_returns_local_ids(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         ids = ArxivClient().fetch_ids(max_results=3)
         assert len(ids) > 0
         for lid in ids:
@@ -760,7 +760,7 @@ class TestArxivClient:
 
     @pytest.mark.network
     def test_fetch_documents_returns_composite_doc_ids(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         c = ArxivClient()
         docs = c.fetch_documents(c.fetch_ids(max_results=2))
         for doc in docs:
@@ -768,7 +768,7 @@ class TestArxivClient:
 
     @pytest.mark.network
     def test_download_text_returns_non_empty_string(self):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         text = ArxivClient().download_text("1706.03762")
         assert isinstance(text, str) and len(text) > 500
 
@@ -890,7 +890,7 @@ class TestArxivTextExtraction:
     """
 
     def test_latexml_extractor_skips_bibliography(self):
-        from backend.crawler.clients.arxiv_client import _LaTeXMLExtractor
+        from backend.crawler.clients import _LaTeXMLExtractor
         html = """
         <div class="ltx_document">
           <p class="ltx_p">Main content here.</p>
@@ -905,7 +905,7 @@ class TestArxivTextExtraction:
         assert "References section" not in text
 
     def test_latexml_extractor_skips_authors(self):
-        from backend.crawler.clients.arxiv_client import _LaTeXMLExtractor
+        from backend.crawler.clients import _LaTeXMLExtractor
         html = """
         <div class="ltx_document">
           <div class="ltx_authors">Alice, Bob (should be skipped)</div>
@@ -919,7 +919,7 @@ class TestArxivTextExtraction:
 
     def test_latexml_extractor_fallback_generic(self):
         """Si no hay ltx_document, usa un parser genérico como fallback."""
-        from backend.crawler.clients.arxiv_client import _extract_text_from_html
+        from backend.crawler.clients import _extract_text_from_html
         html = b"""<html><body>
           <p>No ltx_document here, just plain HTML content.</p>
           <script>alert('skip me')</script>
@@ -929,7 +929,7 @@ class TestArxivTextExtraction:
         assert len(text) > 0
 
     def test_clean_text_in_arxiv_client(self):
-        from backend.crawler.clients.arxiv_client import _clean_text
+        from backend.crawler.clients import _clean_text
         result = _clean_text("word1    word2\n\n\n\nword3")
         assert "  " not in result
         assert "\n\n\n" not in result
@@ -964,7 +964,7 @@ class TestCrawlerRouting:
     def test_default_client_is_arxiv(self):
         """Sin pasar clientes, el Crawler usa ArxivClient por defecto."""
         from backend.crawler.crawler import Crawler, CrawlerConfig
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
 
         # Verificar la lógica de resolución de clientes sin instanciar el Crawler
         # (que requiere SQLite). La lógica está en __init__: if not clients and not client
@@ -975,14 +975,14 @@ class TestCrawlerRouting:
         assert isinstance(client_map["arxiv"], ArxivClient)
 
     def test_client_for_routes_arxiv(self, fake_client):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         arxiv = ArxivClient()
         crawler = self._make_crawler_no_db([arxiv, fake_client])
         result = crawler._client_for("arxiv:2301.12345")
         assert result is arxiv
 
     def test_client_for_routes_fake(self, fake_client):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         arxiv = ArxivClient()
         crawler = self._make_crawler_no_db([arxiv, fake_client])
         result = crawler._client_for("fake:doc1")
@@ -1003,7 +1003,7 @@ class TestCrawlerRouting:
         assert crawler._local_id("src:id:with:colons") == "id:with:colons"
 
     def test_make_doc_id_per_client(self, fake_client):
-        from backend.crawler.clients.arxiv_client import ArxivClient
+        from backend.crawler.clients import ArxivClient
         arxiv = ArxivClient()
         assert arxiv.make_doc_id("2301.12345") == "arxiv:2301.12345"
         assert fake_client.make_doc_id("doc1") == "fake:doc1"
