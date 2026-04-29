@@ -164,7 +164,7 @@ class QueryPipeline:
         ImportError si sentence-transformers o faiss no están instalados.
         """
         from backend.embedding.embedder import ChunkEmbedder
-        from backend.embedding.faiss_index import FaissIndexManager
+        from backend.embedding import FaissIndexManager
 
         log.info("[QueryPipeline] Cargando modelo de embedding '%s'…", self.model_name)
         self._embedder = ChunkEmbedder(model_name=self.model_name, device=device)
