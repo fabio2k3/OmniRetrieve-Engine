@@ -19,7 +19,7 @@ from typing import Optional
 from backend.database.schema import get_connection
 from backend.database.index_repository import get_index_stats
 from backend.database.chunk_repository import get_chunk_stats
-from backend.embedding.faiss_index import FaissIndexManager
+from backend.embedding import FaissIndexManager          # ← import correcto
 from backend.retrieval.lsi_retriever import LSIRetriever
 
 from .config import OrchestratorConfig
@@ -35,13 +35,15 @@ def build_status(
     faiss_mgr:        Optional[FaissIndexManager],
     lsi_ready:        threading.Event,
     faiss_ready:      threading.Event,
+    qrf_ready:        threading.Event,
+    rag_ready:        threading.Event,
 ) -> dict:
     """
     Devuelve un snapshot del estado actual del sistema.
 
-    Consulta SQLite, el modelo LSI y el índice FAISS para obtener
-    las métricas en tiempo real. Los errores de BD se capturan y devuelven
-    como ``-1`` para no interrumpir la respuesta.
+    Consulta SQLite, el modelo LSI, el índice FAISS y los pipelines QRF/RAG
+    para obtener las métricas en tiempo real. Los errores de BD se capturan
+    y devuelven como ``-1`` para no interrumpir la respuesta.
 
     Parámetros
     ----------
@@ -52,6 +54,8 @@ def build_status(
     faiss_mgr        : gestor del índice FAISS compartido.
     lsi_ready        : Event — True si el modelo LSI está disponible.
     faiss_ready      : Event — True si el índice FAISS tiene vectores.
+    qrf_ready        : Event — True si el QueryPipeline (QRF) está cargado.
+    rag_ready        : Event — True si el RAGPipeline está cargado.
 
     Returns
     -------
@@ -62,6 +66,7 @@ def build_status(
         ``lsi_docs_in_model``, ``lsi_model_ready``, ``total_chunks``,
         ``embedded_chunks``, ``pending_chunks``, ``faiss_vectors``,
         ``faiss_index_type``, ``faiss_ready``, ``embed_model``,
+        ``qrf_ready``, ``rag_ready``,
         ``web_threshold``, ``web_min_docs``, ``timestamp``.
     """
     # ── BD: documentos ───────────────────────────────────────────────────────
@@ -118,6 +123,8 @@ def build_status(
         "faiss_vectors":     faiss_vectors,
         "faiss_index_type":  faiss_type,
         "faiss_ready":       faiss_ready.is_set(),
+        "qrf_ready":         qrf_ready.is_set(),
+        "rag_ready":         rag_ready.is_set(),
         "embed_model":       cfg.embed_model,
         "web_threshold":     cfg.web_threshold,
         "web_min_docs":      cfg.web_min_docs,

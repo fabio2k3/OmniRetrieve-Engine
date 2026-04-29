@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from backend.embedding.faiss_index import FaissIndexManager
+from backend.embedding import FaissIndexManager          # ← import correcto
 from .config import OrchestratorConfig
 
 log = logging.getLogger(__name__)

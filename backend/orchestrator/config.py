@@ -77,6 +77,25 @@ class OrchestratorConfig:
     web_search_depth  : profundidad de búsqueda Tavily ("basic" | "advanced").
     web_use_fallback  : usar DuckDuckGo si Tavily falla.
     web_auto_index    : indexar automáticamente los docs web guardados.
+
+    QRF (Query Refinement Framework)
+    ---------------------------------
+    qrf_top_k_initial    : candidatos recuperados en la búsqueda inicial para BRF.
+    qrf_expand           : activar expansión LCE (Latent Concept Expansion) vía LSI.
+    qrf_expand_top_dims  : dimensiones latentes inspeccionadas en la expansión LCE.
+    qrf_expand_min_corr  : correlación mínima para añadir un término de expansión.
+    qrf_expand_max_terms : máximo de términos nuevos añadidos por LCE.
+    qrf_brf_alpha        : peso del vector original en BRF (Blind Relevance Feedback).
+    qrf_brf_top_k        : top resultados usados para calcular el centroide BRF.
+    qrf_mmr_lambda       : balance relevancia/diversidad en MMR (1.0 = solo relevancia).
+
+    RAG (Retrieval-Augmented Generation)
+    -------------------------------------
+    rag_use_reranker   : activar CrossEncoderReranker de segunda etapa.
+    rag_reranker_model : nombre del modelo cross-encoder de sentence-transformers.
+    rag_candidate_k    : candidatos recuperados por EmbeddingRetriever antes del reranking.
+    rag_max_chunks     : chunks máximos inyectados en el contexto enviado al LLM.
+    rag_max_chars      : caracteres máximos por chunk dentro del contexto LLM.
     """
 
     # ── rutas ────────────────────────────────────────────────────────────────
@@ -124,3 +143,22 @@ class OrchestratorConfig:
     web_search_depth: str   = "basic"
     web_use_fallback: bool  = True
     web_auto_index:   bool  = True
+
+    # ── QRF (Query Refinement Framework) ─────────────────────────────────────
+    # Pipeline completo: expansión LCE + embedding + BRF + MMR.
+    qrf_top_k_initial:    int   = 20     # candidatos en la búsqueda inicial (BRF)
+    qrf_expand:           bool  = True   # activar expansión LCE vía LSI
+    qrf_expand_top_dims:  int   = 3      # dimensiones latentes a examinar en LCE
+    qrf_expand_min_corr:  float = 0.4   # umbral mínimo de correlación para añadir término
+    qrf_expand_max_terms: int   = 8      # máximo de términos nuevos añadidos por LCE
+    qrf_brf_alpha:        float = 0.75  # peso del vector original en BRF
+    qrf_brf_top_k:        int   = 5      # resultados usados para el centroide BRF
+    qrf_mmr_lambda:       float = 0.6   # balance relevancia/diversidad en MMR (1=solo relevancia)
+
+    # ── RAG (Retrieval-Augmented Generation) ──────────────────────────────────
+    # Recuperación densa + generación LLM. El retriever usa FAISS (EmbeddingRetriever).
+    rag_use_reranker:   bool  = False                                     # activar CrossEncoderReranker
+    rag_reranker_model: str   = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # modelo del reranker
+    rag_candidate_k:    int   = 50   # candidatos recuperados antes de reranking
+    rag_max_chunks:     int   = 5    # chunks máximos inyectados en el contexto LLM
+    rag_max_chars:      int   = 400  # caracteres máximos por chunk en el contexto LLM
