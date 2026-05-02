@@ -37,6 +37,7 @@ def build_status(
     faiss_ready:      threading.Event,
     qrf_ready:        threading.Event,
     rag_ready:        threading.Event,
+    pipeline_ready:   threading.Event,
 ) -> dict:
     """
     Devuelve un snapshot del estado actual del sistema.
@@ -62,7 +63,7 @@ def build_status(
     dict
         Snapshot con claves:
         ``docs_total``, ``docs_pdf_indexed``, ``docs_pdf_pending``,
-        ``docs_not_in_index``, ``vocab_size``, ``total_postings``,
+        ``vocab_size``, ``total_postings``,
         ``lsi_docs_in_model``, ``lsi_model_ready``, ``total_chunks``,
         ``embedded_chunks``, ``pending_chunks``, ``faiss_vectors``,
         ``faiss_index_type``, ``faiss_ready``, ``embed_model``,
@@ -84,13 +85,9 @@ def build_status(
         pending   = conn.execute(
             "SELECT COUNT(*) FROM documents WHERE pdf_downloaded=0"
         ).fetchone()[0]
-        unindexed = conn.execute(
-            "SELECT COUNT(*) FROM documents "
-            "WHERE pdf_downloaded = 1 AND indexed_tfidf_at IS NULL"
-        ).fetchone()[0]
         conn.close()
     except Exception:
-        total = indexed = pending = unindexed = -1
+        total = indexed = pending = -1
 
     # ── LSI ──────────────────────────────────────────────────────────────────
     with lsi_lock:
@@ -112,7 +109,6 @@ def build_status(
         "docs_total":        total,
         "docs_pdf_indexed":  indexed,
         "docs_pdf_pending":  pending,
-        "docs_not_in_index": unindexed,
         "vocab_size":        idx.get("vocab_size", 0),
         "total_postings":    idx.get("total_postings", 0),
         "lsi_docs_in_model": lsi_docs,
@@ -125,6 +121,7 @@ def build_status(
         "faiss_ready":       faiss_ready.is_set(),
         "qrf_ready":         qrf_ready.is_set(),
         "rag_ready":         rag_ready.is_set(),
+        "pipeline_ready":    pipeline_ready.is_set(),
         "embed_model":       cfg.embed_model,
         "web_threshold":     cfg.web_threshold,
         "web_min_docs":      cfg.web_min_docs,

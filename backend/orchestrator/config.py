@@ -40,15 +40,6 @@ class OrchestratorConfig:
     download_interval  : segundos entre ciclos de descarga de metadatos.
     pdf_interval       : segundos entre ciclos de descarga de PDF.
 
-    Indexing (BM25)
-    ---------------
-    pdf_threshold       : mínimo de PDFs nuevos sin indexar para disparar indexación.
-    index_poll_interval : segundos entre sondeos del watcher.
-    index_field         : campo a indexar: 'full_text', 'abstract' o 'both'.
-    index_batch_size    : documentos por lote en IndexingPipeline BM25.
-    index_use_stemming  : activa SnowballStemmer en el preprocesado BM25.
-    index_min_token_len : longitud mínima de token para BM25.
-
     LSI rebuild
     -----------
     lsi_rebuild_interval : segundos entre reconstrucciones del modelo LSI.
@@ -77,6 +68,34 @@ class OrchestratorConfig:
     web_search_depth  : profundidad de búsqueda Tavily ("basic" | "advanced").
     web_use_fallback  : usar DuckDuckGo si Tavily falla.
     web_auto_index    : indexar automáticamente los docs web guardados.
+
+    Retrieval general
+    -----------------
+    retrieval_top_k     : resultados devueltos por query(), qrf_search(),
+                          rag_search(), rag_ask() y semantic_query() cuando
+                          no se pasa top_k explícito.
+
+    Indexing (BM25)
+    ---------------
+    pdf_threshold       : mínimo de PDFs nuevos sin indexar para disparar indexación.
+    index_poll_interval : segundos entre sondeos del watcher.
+    index_field         : campo a indexar: 'full_text', 'abstract' o 'both'.
+    index_batch_size    : documentos por lote en IndexingPipeline.
+    index_use_stemming  : activa SnowballStemmer en el preprocesado.
+    index_min_token_len : longitud mínima de token.
+
+    HybridRetriever
+    ---------------
+    hybrid_candidate_k  : candidatos por rama (sparse y dense) antes de fusión RRF.
+    hybrid_rrf_k        : constante RRF — mayor valor suaviza la fusión.
+    hybrid_parallel     : ejecutar ambas ramas en paralelo con ThreadPoolExecutor.
+
+    Pipeline unificado (pipeline_ask)
+    ----------------------------------
+    pipeline_top_k      : candidatos devueltos por HybridRetriever al web_search.
+    pipeline_rerank_k   : chunks seleccionados por CrossEncoderReranker para el RAG.
+    pipeline_max_chunks : chunks máximos inyectados en el contexto del LLM.
+    pipeline_max_chars  : caracteres máximos por chunk en el contexto LLM.
 
     QRF (Query Refinement Framework)
     ---------------------------------
@@ -110,14 +129,6 @@ class OrchestratorConfig:
     download_interval:  float = 30.0
     pdf_interval:       float = 60.0
 
-    # ── indexing (BM25) ──────────────────────────────────────────────────────
-    pdf_threshold:       int   = 10
-    index_poll_interval: float = 30.0
-    index_field:         str   = "full_text"
-    index_batch_size:    int   = 100
-    index_use_stemming:  bool  = False
-    index_min_token_len: int   = 3
-
     # ── LSI rebuild ──────────────────────────────────────────────────────────
     lsi_rebuild_interval: float = 3600.0
     lsi_k:                int   = 100
@@ -143,6 +154,30 @@ class OrchestratorConfig:
     web_search_depth: str   = "basic"
     web_use_fallback: bool  = True
     web_auto_index:   bool  = True
+
+    # ── Retrieval general ────────────────────────────────────────────────────
+    retrieval_top_k: int = 10    # resultados a devolver en los métodos standalone
+                                  # (query, qrf_search, rag_search, rag_ask, semantic_query)
+
+    # ── indexing (BM25 — terms + postings) ───────────────────────────────────
+    pdf_threshold:       int   = 10       # PDFs sin indexar para disparar el hilo
+    index_poll_interval: float = 30.0    # segundos entre sondeos del watcher
+    index_field:         str   = "both"  # 'full_text' | 'abstract' | 'both'
+    index_batch_size:    int   = 100     # docs por lote en IndexingPipeline
+    index_use_stemming:  bool  = False   # activar SnowballStemmer
+    index_min_token_len: int   = 3       # longitud mínima de token
+
+    # ── HybridRetriever (LSI sparse + FAISS dense, fusión RRF) ───────────────
+    hybrid_candidate_k: int   = 10    # candidatos por rama (sparse y dense) antes de RRF
+    hybrid_rrf_k:       int   = 60    # constante RRF (mayor = fusión más suave)
+    hybrid_parallel:    bool  = True  # ejecutar ambas ramas en paralelo (ThreadPoolExecutor)
+
+    # ── Pipeline unificado (pipeline_ask) ────────────────────────────────────
+    # Flujo: QRF expand → HybridRetriever → WebSearch → CrossEncoder → RAG
+    pipeline_top_k:     int   = 10    # candidatos que devuelve el HybridRetriever
+    pipeline_rerank_k:  int   = 5     # chunks finales tras el CrossEncoderReranker
+    pipeline_max_chunks: int  = 5     # chunks máximos inyectados en el contexto LLM
+    pipeline_max_chars:  int  = 400   # caracteres máximos por chunk en el contexto LLM
 
     # ── QRF (Query Refinement Framework) ─────────────────────────────────────
     # Pipeline completo: expansión LCE + embedding + BRF + MMR.

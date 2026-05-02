@@ -1,20 +1,25 @@
 """
 threads/indexing.py
 ===================
-Hilo watcher de indexación BM25.
+Hilo watcher de indexación BM25 incremental.
 
-Responsabilidad única: sondear la BD periódicamente y disparar ``do_index``
-cuando hay suficientes PDFs nuevos sin indexar.
+Responsabilidad única: sondear la BD cada ``index_poll_interval`` segundos
+y disparar ``do_index()`` cuando hay suficientes PDFs sin indexar
+(según ``cfg.pdf_threshold``).
+
+La lógica de indexación en sí vive en ``_operations.do_index``.
+Este módulo solo gestiona el timing y la condición de disparo.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable
 
 from backend.database.schema import get_connection
+
 from ..config import OrchestratorConfig
+from .._operations import do_index
 
 log = logging.getLogger(__name__)
 
@@ -22,60 +27,55 @@ log = logging.getLogger(__name__)
 def run_indexing_thread(
     cfg:      OrchestratorConfig,
     shutdown: threading.Event,
-    do_index: Callable[[], dict],
 ) -> None:
     """
-    Sondea la BD cada ``index_poll_interval`` segundos y llama a ``do_index``
-    cuando hay al menos ``pdf_threshold`` PDFs nuevos sin indexar.
+    Watcher de indexación BM25 incremental.
+
+    Sondea la BD periódicamente. Cuando hay al menos ``cfg.pdf_threshold``
+    documentos con PDF descargado pero sin indexar, lanza ``do_index()``.
 
     Parámetros
     ----------
     cfg      : configuración del orquestador.
     shutdown : evento de parada compartido.
-    do_index : callable sin argumentos que ejecuta la indexación incremental.
-               Se recibe inyectado para facilitar tests y mantener este módulo sin estado.
     """
     log.info(
-        "[indexing] Watcher iniciado (umbral=%d PDFs, poll=%ds).",
-        cfg.pdf_threshold, int(cfg.index_poll_interval),
+        "[indexing] Hilo iniciado (poll=%.0fs, threshold=%d docs).",
+        cfg.index_poll_interval, cfg.pdf_threshold,
     )
 
     while not shutdown.is_set():
+        try:
+            pending = _count_pending(cfg)
+            if pending >= cfg.pdf_threshold:
+                log.info(
+                    "[indexing] %d docs pendientes — lanzando indexación.", pending
+                )
+                do_index(cfg)
+            else:
+                log.debug(
+                    "[indexing] %d/%d docs pendientes — sin acción.",
+                    pending, cfg.pdf_threshold,
+                )
+        except Exception as exc:
+            log.error("[indexing] Error inesperado: %s", exc, exc_info=True)
+
         shutdown.wait(timeout=cfg.index_poll_interval)
-        if shutdown.is_set():
-            break
-        _check_and_index(cfg, do_index)
 
-    log.info("[indexing] Watcher detenido.")
+    log.info("[indexing] Hilo detenido.")
 
 
-def _check_and_index(cfg: OrchestratorConfig, do_index: Callable) -> None:
-    """
-    Consulta la BD y dispara ``do_index`` si se supera el umbral.
-    Captura excepciones para que el hilo no muera ante fallos puntuales.
-    """
+def _count_pending(cfg: OrchestratorConfig) -> int:
+    """Cuenta docs con PDF descargado pero aún sin indexar en BM25."""
     try:
         conn = get_connection(cfg.db_path)
-        unindexed = conn.execute(
-            "SELECT COUNT(*) FROM documents "
-            "WHERE pdf_downloaded = 1 AND indexed_tfidf_at IS NULL"
-        ).fetchone()[0]
-        conn.close()
-    except Exception as exc:
-        log.warning("[indexing] Error al consultar BD: %s", exc)
-        return
-
-    if unindexed >= cfg.pdf_threshold:
-        log.info(
-            "[indexing] %d PDFs sin indexar ≥ umbral %d — indexando...",
-            unindexed, cfg.pdf_threshold,
-        )
         try:
-            do_index()
-        except Exception as exc:
-            log.error("[indexing] Error durante indexación: %s", exc, exc_info=True)
-    else:
-        log.debug(
-            "[indexing] %d PDFs pendientes (umbral=%d) — esperando.",
-            unindexed, cfg.pdf_threshold,
-        )
+            return conn.execute(
+                "SELECT COUNT(*) FROM documents "
+                "WHERE pdf_downloaded = 1 AND indexed_tfidf_at IS NULL"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.warning("[indexing] No se pudo consultar pendientes: %s", exc)
+        return 0
