@@ -1,32 +1,48 @@
 """
-app_advanced.py
-===============
+app.py
+======
 
-OmniRetrieve — Interfaz de usuario.
+OmniRetrieve — Interfaz de usuario conectada al Orquestador.
 
 Ejecutar (desde la raíz del proyecto):
-    streamlit run frontend/app_advanced.py
+    streamlit run frontend/frontend/app.py
+  o bien:
+    python -m backend.orchestrator
 
-PUNTOS DE CONEXIÓN PARA EL ORQUESTADOR
----------------------------------------
-Las tres funciones marcadas con  ← CONECTAR  son los únicos lugares donde
-esta UI toca el backend. El orquestador debe asegurarse de que los módulos
-correspondientes estén listos antes de que el usuario haga la primera consulta.
+PUNTO DE CONEXIÓN ÚNICO
+------------------------
+get_orchestrator() crea y arranca el Orchestrator una sola vez por proceso
+gracias a @st.cache_resource. Todos los hilos daemon (crawler, LSI, FAISS,
+embedding, QRF/RAG) se inician automáticamente en el momento del primer uso.
 
-    load_retriever()  ← LSIRetriever cargado con modelo y BD
-    load_rag()        ← RAGPipeline con retriever inyectado
-    load_web()        ← WebSearchPipeline con API key del .env
-
-CONTRATO RAG (rag.ask)
------------------------
-La UI espera un dict con las claves "answer" y "sources", pero tolera
-cualquier variación: claves ausentes, valores None, o tipos inesperados.
-Ver _safe_rag_output() para los detalles.
+FLUJOS DE CONSULTA
+------------------
+  Modo Search  -> orc.query(text)           LSI local (rápido)
+  Modo Ask AI  -> orc.pipeline_ask(text)    QRF expand -> Hybrid -> Web -> Rerank -> RAG
 """
 
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path
+
+# -- Asegurar que el paquete 'backend' sea importable -------------------------
+# Sube desde app.py buscando el directorio que contenga backend/backend/__init__.py
+# Esto funciona independientemente de desde donde se lance Streamlit.
+def _find_backend_root() -> Path | None:
+    p = Path(__file__).resolve().parent
+    for _ in range(6):
+        if (p / "backend" / "backend" / "__init__.py").exists():
+            return p / "backend"
+        p = p.parent
+    return None
+
+_BACKEND = _find_backend_root()
+if _BACKEND and str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+# -----------------------------------------------------------------------------
+
 import streamlit as st
 
 # ── Configuración de página ───────────────────────────────────────────────────
@@ -324,54 +340,41 @@ st.markdown(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_resource(show_spinner=False)
-def load_retriever():
+def get_orchestrator():
     """
-    ← CONECTAR: retorna (LSIRetriever listo, None) o (None, mensaje_error).
-    El retriever debe tener .retrieve(query: str, top_n: int) -> list[dict]
-    donde cada dict contiene: score, arxiv_id, title, authors, abstract, url.
+    Crea y arranca el Orchestrator una sola vez por proceso (Streamlit cache).
+    Inicia todos los hilos daemon: crawler, LSI rebuild, embedding, QRF/RAG.
+    Devuelve (orchestrator, None) o (None, mensaje_error).
     """
     try:
-        from backend.retrieval.lsi_retriever import LSIRetriever
-        r = LSIRetriever()
-        r.load()
-        return r, None
-    except FileNotFoundError:
-        return None, "Modelo LSI no encontrado. Ejecuta: python -m backend.retrieval.build_lsi"
+        import os, json
+        from backend.orchestrator.orchestrator import Orchestrator
+        from backend.orchestrator.config import OrchestratorConfig
+
+        raw = os.environ.get("OMNIRETRIEVE_CONFIG")
+        if raw:
+            overrides = json.loads(raw)
+            cfg = OrchestratorConfig(**{k: v for k, v in overrides.items()
+                                        if hasattr(OrchestratorConfig(), k)})
+        else:
+            cfg = OrchestratorConfig()
+
+        orc = Orchestrator(cfg)
+        orc.start()
+        return orc, None
     except Exception as e:
         return None, str(e)
 
 
-@st.cache_resource(show_spinner=False)
-def load_rag():
-    """
-    ← CONECTAR: retorna (RAGPipeline listo, None) o (None, mensaje_error).
-    El pipeline debe tener .ask(query, top_k, candidate_k, max_chunks, max_chars)
-    -> dict con claves: answer (str), sources (list[dict]).
-    Claves adicionales o ausentes son toleradas por _safe_rag_output().
-    """
+def _system_status() -> dict | None:
+    """Devuelve el snapshot de estado del Orchestrator, o None si no esta listo."""
+    orc, err = get_orchestrator()
+    if err or orc is None:
+        return None
     try:
-        from backend.rag.pipeline import RAGPipeline
-        ret, err = load_retriever()
-        if err:
-            return None, err
-        return RAGPipeline(retriever=ret), None
-    except Exception as e:
-        return None, str(e)
-
-
-@st.cache_resource(show_spinner=False)
-def load_web():
-    """
-    ← CONECTAR: retorna (WebSearchPipeline listo, None) o (None, mensaje_error).
-    El pipeline debe tener .run(query, retriever_results) -> dict con claves:
-    results (list[dict]), web_activated (bool), web_results (list[dict]).
-    Si falla, la app continúa sin búsqueda web (no es error crítico).
-    """
-    try:
-        from backend.web_search.pipeline import WebSearchPipeline
-        return WebSearchPipeline(), None
-    except Exception as e:
-        return None, str(e)
+        return orc.status()
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -436,24 +439,26 @@ def _safe_rag_output(raw) -> tuple[str, list]:
 
 def _run_web_search(query: str, base_results: list) -> tuple[bool, list, str]:
     """
-    Ejecuta el WebSearchPipeline de forma silenciosa.
+    Ejecuta busqueda web a traves del Orchestrator (query_with_web).
     Devuelve (web_activated, web_results, elapsed_label).
     """
     try:
-        pipeline, _ = load_web()
-        if not pipeline:
+        orc, err = get_orchestrator()
+        if err or orc is None:
             return False, [], ""
         t0  = time.monotonic()
-        out = pipeline.run(query, [_normalize(r) for r in base_results])
+        out = orc.query_with_web(query)
         elapsed = f"{(time.monotonic() - t0)*1000:.0f}ms"
+        all_results = out.get("results", [])
+        web_results  = [r for r in all_results
+                        if r.get("source") in ("web", "web_fallback")]
         return (
             out.get("web_activated", False),
-            out.get("web_results", []),
+            web_results,
             elapsed,
         )
     except Exception:
         return False, [], ""
-
 
 def render_result(r: dict) -> None:
     """Renderiza una tarjeta de resultado (paper local o fuente web)."""
@@ -540,6 +545,43 @@ def render_paginated(results: list, page_key: str) -> None:
 # SESIÓN Y MODO
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Arrancar el Orchestrator inmediatamente al cargar la app (no esperar a que
+# el usuario haga una busqueda). get_orchestrator usa @st.cache_resource, por
+# lo que los hilos daemon solo se crean una vez por proceso.
+_orc_startup, _orc_startup_err = get_orchestrator()
+
+# =============================================================================
+# SIDEBAR -- estado del motor de busqueda
+# =============================================================================
+
+with st.sidebar:
+    st.markdown("### Motor de busqueda")
+    s = _system_status()
+    if s is None:
+        st.error("Orchestrator no disponible")
+    else:
+        def _dot(ready: bool) -> str:
+            return "Listo" if ready else "Cargando..."
+
+        rows = [
+            ("LSI",              s.get("lsi_model_ready")),
+            ("FAISS",            s.get("faiss_ready")),
+            ("QRF",              s.get("qrf_ready")),
+            ("RAG",              s.get("rag_ready")),
+            ("Pipeline completo",s.get("pipeline_ready")),
+        ]
+        for name, ready in rows:
+            icon = ":green[OK]" if ready else ":orange[...]"
+            st.write(f"{icon} **{name}**")
+        st.caption(
+            f"{s.get('docs_total', 0)} docs  "
+            f"| {s.get('faiss_vectors', 0)} vectores  "
+            f"| {s.get('total_chunks', 0)} chunks"
+        )
+    if st.button("Actualizar estado", use_container_width=True):
+        st.rerun()
+
+
 for key in ("mode", "last_query", "search_results", "ask_output",
             "web_activated", "web_results", "web_elapsed"):
     if key not in st.session_state:
@@ -618,13 +660,16 @@ if clicked and query.strip():
     if mode == "search":
         t0 = time.monotonic()
 
-        with st.spinner("Searching papers…"):
-            retriever, err = load_retriever()
-            if err:
-                st.error(f"⚠️ Search unavailable: {err}")
+        with st.spinner("Searching papers..."):
+            orc, err = get_orchestrator()
+            if err or orc is None:
+                st.error(f"Search unavailable: {err or 'Orchestrator not ready'}")
+                st.stop()
+            if not orc._lsi_ready.is_set():
+                st.warning("LSI model is still loading -- try again in a moment.")
                 st.stop()
             try:
-                local_results = retriever.retrieve(query.strip(), top_n=10)
+                local_results = orc.query(query.strip(), top_n=10)
             except Exception as e:
                 st.error(f"Search error: {e}")
                 st.stop()
@@ -674,29 +719,27 @@ if clicked and query.strip():
 
     # ── ASK AI ────────────────────────────────────────────────────────────────
     else:
-        with st.spinner("Building answer…"):
-            rag, err = load_rag()
-            if err:
-                st.error(f"⚠️ AI assistant unavailable: {err}")
+        with st.spinner("Building answer..."):
+            orc, err = get_orchestrator()
+            if err or orc is None:
+                st.error(f"AI assistant unavailable: {err or 'Orchestrator not ready'}")
+                st.stop()
+            if not orc._pipeline_ready.is_set():
+                st.warning(
+                    "Pipeline is still warming up (FAISS + LSI + QRF + RAG). "
+                    "Check the sidebar for status."
+                )
                 st.stop()
             try:
-                raw_out = rag.ask(
-                    query=query.strip(),
-                    top_k=10,
-                    candidate_k=50,
-                    max_chunks=5,
-                    max_chars=400,
-                )
+                raw_out = orc.pipeline_ask(query.strip())
             except Exception as e:
                 st.error(f"Something went wrong: {e}")
                 st.stop()
 
-        # Extracción defensiva — tolera cualquier forma de respuesta del RAG
+        # Extraccion defensiva -- pipeline_ask ya gestiona web
         answer, sources = _safe_rag_output(raw_out)
-
-        # Web search — spinner separado y visible
-        with st.spinner("Checking web sources…"):
-            web_activated, web_extra, _ = _run_web_search(query.strip(), sources)
+        web_activated = raw_out.get("web_activated", False) if isinstance(raw_out, dict) else False
+        web_extra     = []  # fuentes web ya vienen dentro de sources
 
         if web_activated:
             st.markdown(

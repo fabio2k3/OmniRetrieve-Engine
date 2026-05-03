@@ -472,6 +472,14 @@ def do_pipeline_ask(
             expanded_query, top_n=cfg.pipeline_top_k
         )
         log.info("[pipeline] HybridRetriever devolvió %d candidatos.", len(hybrid_results))
+        if hybrid_results:
+            log.info("[pipeline] Top-%d Hybrid (score / arxiv_id / titulo):", len(hybrid_results))
+            for i, r in enumerate(hybrid_results, 1):
+                title = (r.metadata.get("title") or r.arxiv_id or "")[:55]
+                log.info(
+                    "  %2d. [%s]  score=%.4f  %s",
+                    i, r.score_type, r.score, title,
+                )
     except Exception as exc:
         log.error("[pipeline] HybridRetriever falló: %s", exc, exc_info=True)
         return {
@@ -515,6 +523,14 @@ def do_pipeline_ask(
             "[pipeline] CrossEncoder: %d candidatos → %d chunks seleccionados.",
             len(all_results), len(reranked),
         )
+        if reranked:
+            log.info("[pipeline] Top-%d tras reranking (score / arxiv_id / titulo):", len(reranked))
+            for i, r in enumerate(reranked, 1):
+                title = (r.metadata.get("title") or r.arxiv_id or "")[:55]
+                log.info(
+                    "  %2d. [rerank]  score=%.4f  %s",
+                    i, r.score, title,
+                )
     except Exception as exc:
         log.warning("[pipeline] CrossEncoder falló, usando resultados sin reranking: %s", exc)
         reranked = all_results[:cfg.pipeline_rerank_k]

@@ -11,7 +11,6 @@ Toda la lógica de negocio está delegada en módulos internos:
     _operations.py  → todas las operaciones de pipeline.
     _status.py      → build_status().
     threads/        → un fichero por hilo daemon.
-    cli.py          → presentación e interacción con el usuario.
 
 Hilos daemon
 ------------
@@ -59,7 +58,6 @@ from .threads     import (
     run_embedding_thread,
     run_qrf_rag_loader_thread,
 )
-from .cli import run_cli
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +70,7 @@ class Orchestrator:
     ---
         orc = Orchestrator()
         orc.start()
-        orc.run_cli()
+        # La interfaz de usuario (Streamlit) llama a los métodos de la API pública.
         orc.stop()
     """
 
@@ -127,12 +125,20 @@ class Orchestrator:
 
     def start(self) -> None:
         """Arranca los cuatro hilos daemon. No bloquea."""
+        # Orden de arranque optimizado para minimizar el tiempo hasta
+        # que LSI y FAISS estén listos (búsqueda disponible lo antes posible).
+        #
+        # 1. lsi_rebuild — carga rápida del .pkl existente → lsi_ready en segundos
+        # 2. embedding   — procesa chunks pendientes → faiss_ready
+        # 3. qrf_rag     — espera lsi+faiss y construye el pipeline completo
+        # 4. crawler     — descarga de documentos (red, no bloquea búsqueda)
+        # 5. indexing    — indexación BM25 (disco, no bloquea búsqueda)
         specs = [
-            ("crawler",     self._target_crawler),
-            ("indexing",    self._target_indexing),
             ("lsi_rebuild", self._target_lsi_rebuild),
             ("embedding",   self._target_embedding),
             ("qrf_rag",     self._target_qrf_rag_loader),
+            ("crawler",     self._target_crawler),
+            ("indexing",    self._target_indexing),
         ]
         for name, target in specs:
             t = threading.Thread(target=target, name=name, daemon=True)
@@ -144,29 +150,6 @@ class Orchestrator:
         """Señala a todos los hilos que deben terminar."""
         log.info("[Orchestrator] Señal de parada enviada.")
         self._shutdown.set()
-
-    def run_cli(self) -> None:
-        """Arranca la CLI interactiva en el hilo principal."""
-        run_cli(
-            shutdown         = self._shutdown,
-            lsi_ready        = self._lsi_ready,
-            qrf_ready        = self._qrf_ready,
-            rag_ready        = self._rag_ready,
-            pipeline_ready   = self._pipeline_ready,
-            lsi_min_docs     = self.cfg.lsi_min_docs,
-            fn_pipeline_ask  = self.pipeline_ask,
-            fn_query         = self.query,
-            fn_query_web     = self.query_with_web,
-            fn_qrf_search    = self.qrf_search,
-            fn_rag_search    = self.rag_search,
-            fn_rag_ask       = self.rag_ask,
-            fn_status        = self.status,
-            fn_index         = lambda: do_index(self.cfg),
-            fn_rebuild       = lambda: do_lsi_rebuild(
-                self.cfg, self._lsi_lock, self._lsi_ready, self._retriever_holder
-            ),
-            fn_stop          = self.stop,
-        )
 
     # ── API pública — pipeline unificado ─────────────────────────────────────
 
