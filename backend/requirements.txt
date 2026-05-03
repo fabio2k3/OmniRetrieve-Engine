@@ -48,5 +48,8 @@ duckduckgo-search>=6.0.0   # fallback gratuito sin API key
 #
 ollama>=0.3.0
 
+#UI
+streamlit
+
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=7.0.0
