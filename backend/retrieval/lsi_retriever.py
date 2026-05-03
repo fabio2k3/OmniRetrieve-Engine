@@ -196,3 +196,54 @@ class LSIRetriever:
         finally:
             conn.close()
         return {r["arxiv_id"]: dict(r) for r in rows}
+
+# ---------------------------------------------------------------------------
+# Adaptador: LSIRetriever → RetrieverProtocol
+# ---------------------------------------------------------------------------
+
+class LSIRetrieverAdapter:
+    """
+    Envuelve LSIRetriever para que cumpla RetrieverProtocol.
+
+    LSIRetriever.retrieve() devuelve list[dict] con claves:
+        score, arxiv_id, title, authors, abstract, url
+
+    RetrieverProtocol.retrieve() debe devolver list[RetrievalResult]
+    (nivel chunk). Como LSI opera a nivel de documento, cada resultado
+    se mapea a un RetrievalResult con chunk_index=0 y text=abstract.
+
+    Parameters
+    ----------
+    retriever : LSIRetriever ya cargado (load() ya llamado).
+    """
+
+    def __init__(self, retriever: "LSIRetriever") -> None:
+        self._retriever = retriever
+
+    def retrieve(self, query: str, top_n: int = 20) -> list:
+        """
+        Llama a LSIRetriever.retrieve() y convierte los dicts a
+        RetrievalResult para ser compatible con HybridRetriever.
+        """
+        from backend.retrieval.protocols import RetrievalResult
+
+        raw: list[dict] = self._retriever.retrieve(query, top_n=top_n)
+        results = []
+        for i, r in enumerate(raw):
+            arxiv_id = r.get("arxiv_id", "")
+            results.append(
+                RetrievalResult(
+                    chunk_id    = f"{arxiv_id}__lsi__{i}",
+                    arxiv_id    = arxiv_id,
+                    chunk_index = 0,
+                    text        = r.get("abstract") or r.get("title") or "",
+                    score       = float(r.get("score", 0.0)),
+                    score_type  = "cosine",
+                    metadata    = {
+                        "title":   r.get("title", ""),
+                        "authors": r.get("authors", ""),
+                        "url":     r.get("url", ""),
+                    },
+                )
+            )
+        return results
