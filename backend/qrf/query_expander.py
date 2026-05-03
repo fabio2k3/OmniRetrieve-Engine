@@ -18,14 +18,6 @@ Flujo
 5. Filtra términos por umbral de correlación para evitar Query Drift.
 6. Devuelve la consulta enriquecida como string para re-encodear con
    SentenceTransformer.
-
-Por qué LCE antes de FAISS
----------------------------
-SentenceTransformer es preciso pero sensible a la longitud y vocabulario
-de la query. Una consulta de 3 palabras puede no activar el embedding
-correcto si el corpus usa sinónimos o jerga específica del dominio.
-LCE añade 5-10 términos del corpus que estadísticamente co-ocurren en
-los mismos conceptos, mejorando la cobertura semántica del embedding.
 """
 
 from __future__ import annotations

@@ -164,7 +164,7 @@ class QueryPipeline:
         ImportError si sentence-transformers o faiss no están instalados.
         """
         from backend.embedding.embedder import ChunkEmbedder
-        from backend.embedding.faiss_index import FaissIndexManager
+        from backend.embedding import FaissIndexManager
 
         log.info("[QueryPipeline] Cargando modelo de embedding '%s'…", self.model_name)
         self._embedder = ChunkEmbedder(model_name=self.model_name, device=device)
@@ -201,6 +201,28 @@ class QueryPipeline:
     # ------------------------------------------------------------------
     # Búsqueda principal
     # ------------------------------------------------------------------
+
+    def expand_query(self, query: str) -> tuple[str, list[str]]:
+        """
+        Expande la query con LCE (Latent Concept Expansion) usando el modelo LSI.
+
+        Devuelve la query expandida (original + términos nuevos concatenados)
+        y la lista de términos añadidos. Si la expansión está desactivada o
+        el modelo LSI no está disponible, devuelve la query sin cambios.
+
+        Parámetros
+        ----------
+        query : consulta original en lenguaje natural.
+
+        Returns
+        -------
+        tuple[str, list[str]]
+            ``(expanded_query, new_terms)``
+        """
+        self._check_loaded()
+        if self._expand_enabled:
+            return self._expander.expand(query)
+        return query, []
 
     def search(self, query: str, top_k: int = 10) -> list[dict]:
         """

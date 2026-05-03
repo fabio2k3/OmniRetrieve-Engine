@@ -1,294 +1,494 @@
 ---
-noteId: "2d0468b0296711f1b0a22758fc0c48d3"
+noteId: "4cdafa503c2211f19f111fe4db9ea2b5"
 tags: []
 
 ---
 
-# OmniRetrieve — Módulo Orquestador
+# Módulo `orchestrator` — Documentación completa
 
-Coordina los cuatro módulos del sistema (crawler, indexing, embedding, retrieval) en tiempo real. Ejecuta cada módulo en su propio hilo de fondo y expone una CLI interactiva para lanzar consultas mientras el sistema está corriendo.
+## Índice
 
----
-
-## Estructura de archivos
-
-```
-backend/orchestrator/
-+-- config.py        <- dataclass OrchestratorConfig con todos los parametros
-+-- threads.py       <- funciones target de los cuatro hilos de fondo
-+-- orchestrator.py  <- clase Orchestrator (estado compartido + API publica)
-+-- cli.py           <- bucle interactivo y funciones de presentacion
-+-- main.py          <- entrypoint CLI + argparse
-+-- __init__.py      <- exports publicos
-```
-
----
-
-## Cómo ejecutar
-
-```bash
-# Arranque con parametros por defecto
-python -m backend.orchestrator
-
-# Para pruebas rapidas
-python -m backend.orchestrator \
-  --pdf-threshold 3 \
-  --lsi-interval 300 \
-  --lsi-k 50 \
-  --lsi-min-docs 5 \
-  --embed-threshold 10
-```
-
-### Parámetros disponibles
-
-```bash
-python -m backend.orchestrator \
-  --db                ruta/a/documents.db  \
-  --model             ruta/a/modelo.pkl    \
-
-  # Crawler
-  --ids-per-discovery 100    \
-  --batch-size        10     \
-  --pdf-batch         5      \
-  --discovery-interval 120   \
-  --download-interval  30    \
-  --pdf-interval       60    \
-
-  # Indexing
-  --pdf-threshold     10     \
-  --index-poll        30     \
-  --index-field       full_text \
-
-  # LSI
-  --lsi-interval      3600   \
-  --lsi-k             100    \
-  --lsi-min-docs      10     \
-
-  # Embedding
-  --embed-model       all-MiniLM-L6-v2 \
-  --embed-batch       256              \
-  --embed-poll        60               \
-  --embed-threshold   50               \
-  --embed-rebuild-every 10000          \
-  --embed-nlist       100              \
-  --embed-m           8                \
-  --embed-nbits       8                \
-  --embed-nprobe      10
-```
+1. [Visión general](#1-visión-general)
+2. [Estructura de ficheros](#2-estructura-de-ficheros)
+3. [Flujo completo de trabajo](#3-flujo-completo-de-trabajo)
+4. [Módulos — referencia detallada](#4-módulos--referencia-detallada)
+   - [config.py](#41-configpy)
+   - [orchestrator.py](#42-orchestratorpy)
+   - [_faiss.py](#43-_faisspy)
+   - [_operations.py](#44-_operationspy)
+   - [_status.py](#45-_statuspy)
+   - [cli.py](#46-clipy)
+   - [main.py](#47-mainpy)
+   - [threads/crawler.py](#48-threadscrawlerpy)
+   - [threads/indexing.py](#49-threadsindexingpy)
+   - [threads/lsi.py](#410-threadslsipy)
+   - [threads/embedding.py](#411-threadsembeddingpy)
+5. [Integración de módulos nuevos](#5-integración-de-módulos-nuevos)
+   - [new_indexing (BM25)](#51-new_indexing-bm25)
+   - [web_search](#52-web_search)
+6. [Librerías utilizadas](#6-librerías-utilizadas)
+7. [Referencia de comandos CLI](#7-referencia-de-comandos-cli)
 
 ---
 
-## Arquitectura: 4 hilos + CLI
+## 1. Visión general
+
+El módulo `orchestrator` es el **coordinador central** de OmniRetrieve-Engine. Su trabajo es arrancar y supervisar cuatro hilos daemon independientes que mantienen el sistema actualizado de forma continua, y exponer una API pública de consulta que usa la CLI y cualquier módulo externo.
 
 ```
-+----------------------------------------------------------------+
-|                         Orchestrator                           |
-|                                                                |
-|  Hilo 1: crawler         Hilo 2: indexing watcher             |
-|  ----------------        ----------------------               |
-|  run_forever()      ->   sondea BD cada 30s                   |
-|  descarga IDs,           si delta >= pdf_threshold            |
-|  metadatos y PDFs        -> IndexingPipeline.run()            |
-|                                                                |
-|  Hilo 3: lsi_rebuild     Hilo 4: embedding watcher            |
-|  -------------------     -----------------------              |
-|  duerme N segundos  ->   sondea BD cada 60s                   |
-|  reconstruye modelo      si chunks_pendientes >= umbral       |
-|  actualiza retriever     -> EmbeddingPipeline.run()           |
-|  LSI bajo RLock          actualiza indice FAISS               |
-|                                                                |
-|  Hilo main: CLI                                               |
-|  ---------------                                              |
-|  input() interactivo                                          |
-|  query | semantic | status | index | rebuild | quit           |
-+----------------------------------------------------------------+
+                         ┌─────────────────────────────┐
+                         │         Orchestrator         │
+                         │  (ciclo de vida + API pública)│
+                         └──────────────┬──────────────┘
+              ┌───────────────┬──────────┴──────────┬───────────────┐
+              ▼               ▼                     ▼               ▼
+       [crawler]        [indexing]            [lsi_rebuild]   [embedding]
+     ArxivClient →    BM25Pipeline →         LSIModel →      EmbeddingPipeline →
+      IdStore +         SQLite                LSIRetriever     FaissIndexManager
+      Documents
 ```
 
-### Hilo 1 — Crawler
+**Datos compartidos** entre hilos (protegidos con locks):
 
-Llama directamente a `Crawler.run_forever()`. Un hilo auxiliar (watchdog) vigila la señal de shutdown y llama a `crawler.stop()` para que el hilo termine limpiamente.
-
-### Hilo 2 — Indexing watcher
-
-Cada `index_poll_interval` segundos consulta cuántos documentos tienen `pdf_downloaded=1` e `indexed_tfidf_at IS NULL`. Si el número es mayor o igual a `pdf_threshold`, lanza `IndexingPipeline.run()` de forma incremental.
-
-### Hilo 3 — LSI rebuild
-
-Intenta construir el modelo al arrancar (si hay suficientes docs). Luego duerme `lsi_rebuild_interval` segundos y repite. Cuando el modelo está listo, actualiza el `LSIRetriever` compartido bajo un `RLock` y activa el evento `_lsi_ready`.
-
-### Hilo 4 — Embedding watcher
-
-Cada `embed_poll_interval` segundos consulta cuántos chunks tienen `embedding IS NULL`. Si supera `embed_threshold`, lanza `EmbeddingPipeline.run()`. Al terminar, recarga el índice FAISS en el `FaissIndexManager` compartido y activa `_faiss_ready` para habilitar `semantic_query()`.
-
-El primer chequeo ocurre inmediatamente al arrancar el hilo para procesar chunks pendientes de sesiones anteriores sin esperar el intervalo completo.
+| Recurso | Lock | Hilo escritor | Hilo lector |
+|---|---|---|---|
+| `_retriever_holder` | `_lsi_lock` | `lsi_rebuild` | `query()` |
+| `_faiss_mgr` | `_faiss_lock` | `embedding` | `semantic_query()` |
 
 ---
 
-## Sincronización entre hilos
+## 2. Estructura de ficheros
 
-| Mecanismo | Tipo | Propósito |
+```
+orchestrator/
+│
+├── __init__.py          Exports públicos del paquete.
+├── config.py            OrchestratorConfig — todos los parámetros.
+├── orchestrator.py      Orchestrator — coordinación y API pública.
+├── _faiss.py            Inicialización del FaissIndexManager (interno).
+├── _operations.py       Operaciones de negocio: do_index, do_lsi_rebuild,
+│                        do_embed, do_web_search (interno).
+├── _status.py           build_status() — snapshot del sistema (interno).
+├── cli.py               Bucle interactivo y funciones de presentación.
+├── main.py              Entrypoint: parseo de args + arranque del sistema.
+│
+└── threads/
+    ├── __init__.py
+    ├── crawler.py       run_crawler_thread — ejecuta el ArxivCrawler.
+    ├── indexing.py      run_indexing_thread — watcher de indexación BM25.
+    ├── lsi.py           run_lsi_rebuild_thread — rebuild periódico del LSI.
+    └── embedding.py     run_embedding_thread — watcher de embedding FAISS.
+```
+
+---
+
+## 3. Flujo completo de trabajo
+
+### Arranque
+
+```
+main.py → _parse_args() → OrchestratorConfig
+       → Orchestrator.__init__()
+           → init_db() + init_embedding_schema()
+           → init_faiss_mgr() → carga índice FAISS si existe
+       → Orchestrator.start()
+           → Thread(crawler)     → run_crawler_thread()
+           → Thread(indexing)    → run_indexing_thread()
+           → Thread(lsi_rebuild) → run_lsi_rebuild_thread()
+           → Thread(embedding)   → run_embedding_thread()
+       → Orchestrator.run_cli()  → bucle interactivo
+```
+
+### Pipeline de datos (en estado estacionario)
+
+```
+[crawler]
+  ArxivClient.fetch_ids()      → IdStore (CSV)
+  ArxivClient.fetch_documents() → Document (CSV + SQLite)
+  ArxivClient.download_text()  → texto completo + chunks → SQLite
+
+[indexing] (cada 30s, si ≥ pdf_threshold PDFs nuevos)
+  new_indexing.IndexingPipeline.run() → BM25 postings → SQLite
+
+[lsi_rebuild] (cada 3600s)
+  LSIModel.build()  → SVD sobre postings
+  LSIModel.save()   → disco (.pkl)
+  LSIRetriever.load() → retriever_holder[0]
+
+[embedding] (cada 60s, si ≥ embed_threshold chunks nuevos)
+  EmbeddingPipeline.run() → vectores → FaissIndexManager
+  FaissIndexManager.load() → actualiza _faiss_mgr
+
+[query] (bajo demanda, hilo principal)
+  LSIRetriever.retrieve(text) → resultados locales
+  └→ [do_web_search] si score < web_threshold
+       WebSearchPipeline.run() → Tavily / DuckDuckGo → BD + índice
+```
+
+---
+
+## 4. Módulos — referencia detallada
+
+### 4.1 `config.py`
+
+**Propósito:** centralizar todos los parámetros de comportamiento del orquestador.
+
+**Clase:** `OrchestratorConfig` (dataclass)
+
+#### Grupo: Rutas
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `db_path` | `Path` | `data/documents.db` | BD SQLite compartida. |
+| `model_path` | `Path` | `data/lsi_model.pkl` | Fichero del modelo LSI. |
+
+#### Grupo: Crawler
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `ids_per_discovery` | `int` | `100` | IDs a descubrir por ciclo. |
+| `batch_size` | `int` | `10` | Metadatos por ciclo. |
+| `pdf_batch_size` | `int` | `5` | PDFs por ciclo. |
+| `discovery_interval` | `float` | `120.0` | Segundos entre ciclos de discovery. |
+| `download_interval` | `float` | `30.0` | Segundos entre ciclos de metadatos. |
+| `pdf_interval` | `float` | `60.0` | Segundos entre PDFs individuales. |
+
+#### Grupo: Indexing BM25
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `pdf_threshold` | `int` | `10` | PDFs nuevos para disparar indexación. |
+| `index_poll_interval` | `float` | `30.0` | Segundos entre sondeos. |
+| `index_field` | `str` | `"full_text"` | Campo a indexar: `"full_text"`, `"abstract"` o `"both"`. |
+| `index_batch_size` | `int` | `100` | Docs por lote en BM25. |
+| `index_use_stemming` | `bool` | `False` | Activar SnowballStemmer. |
+| `index_min_token_len` | `int` | `3` | Longitud mínima de token. |
+
+#### Grupo: LSI rebuild
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `lsi_rebuild_interval` | `float` | `3600.0` | Segundos entre rebuilds. |
+| `lsi_k` | `int` | `100` | Componentes latentes del SVD. |
+| `lsi_min_docs` | `int` | `10` | Mínimo de docs indexados para construir el modelo. |
+
+#### Grupo: Embedding / FAISS
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `embed_model` | `str` | `"all-MiniLM-L6-v2"` | Modelo sentence-transformers. |
+| `embed_batch_size` | `int` | `256` | Chunks por lote. |
+| `embed_poll_interval` | `float` | `60.0` | Segundos entre sondeos. |
+| `embed_threshold` | `int` | `50` | Chunks pendientes para disparar embedding. |
+| `embed_rebuild_every` | `int` | `10000` | Chunks entre rebuilds completos de FAISS. |
+| `embed_nlist` | `int` | `100` | Celdas Voronoi para IndexIVFPQ. |
+| `embed_m` | `int` | `8` | Subvectores PQ. |
+| `embed_nbits` | `int` | `8` | Bits por código PQ. |
+| `embed_nprobe` | `int` | `10` | Celdas inspeccionadas en búsqueda. |
+| `faiss_index_path` | `Path` | `data/faiss/index.faiss` | Fichero .faiss serializado. |
+| `faiss_id_map_path` | `Path` | `data/faiss/id_map.npy` | Mapa posición → chunk_id. |
+
+#### Grupo: Web Search
+
+| Campo | Tipo | Default | Descripción |
+|---|---|---|---|
+| `web_threshold` | `float` | `0.15` | Score mínimo del LSI para no activar web. |
+| `web_min_docs` | `int` | `1` | Docs mínimos que deben superar el umbral. |
+| `web_max_results` | `int` | `5` | Máximo resultados a pedir a Tavily/DDG. |
+| `web_search_depth` | `str` | `"basic"` | Profundidad Tavily: `"basic"` o `"advanced"`. |
+| `web_use_fallback` | `bool` | `True` | Usar DuckDuckGo si Tavily falla. |
+| `web_auto_index` | `bool` | `True` | Indexar automáticamente docs web nuevos. |
+
+---
+
+### 4.2 `orchestrator.py`
+
+**Propósito:** crear el estado compartido, arrancar los hilos daemon y exponer la API pública.
+
+**Clase:** `Orchestrator`
+
+#### `__init__(config)`
+
+| Parámetro | Tipo | Descripción |
 |---|---|---|
-| `_shutdown` | `threading.Event` | Señal de parada limpia para todos los hilos |
-| `_lsi_lock` | `threading.RLock` | Protege el `LSIRetriever` durante el swap al rebuildar |
-| `_lsi_ready` | `threading.Event` | Indica que ya existe al menos un modelo LSI cargado |
-| `_retriever_holder` | `list[LSIRetriever]` | Contenedor mutable para el swap bajo lock |
-| `_faiss_lock` | `threading.RLock` | Protege el `FaissIndexManager` durante la recarga |
-| `_faiss_ready` | `threading.Event` | Indica que el índice FAISS está listo para búsquedas |
+| `config` | `OrchestratorConfig \| None` | Configuración. Si es `None` usa los defaults. |
+
+Inicializa BD, esquema de embedding e índice FAISS, y crea los cuatro objetos `Thread` (sin arrancarlos aún).
+
+#### Métodos de ciclo de vida
+
+| Método | Entrada | Salida | Descripción |
+|---|---|---|---|
+| `start()` | — | `None` | Arranca los cuatro hilos daemon. No bloquea. |
+| `stop()` | — | `None` | Activa `_shutdown` para que todos los hilos terminen. |
+| `run_cli()` | — | `None` | Arranca la CLI interactiva. Bloquea hasta `quit`. |
+
+#### Métodos de consulta
+
+| Método | Entrada | Salida | Descripción |
+|---|---|---|---|
+| `query(text, top_n=10)` | `str, int` | `list[dict]` | Query LSI local. Lista vacía si el modelo no está listo. |
+| `query_with_web(text, top_n=10)` | `str, int` | `dict` | Query LSI + fallback web. Ver `do_web_search`. |
+| `semantic_query(text, top_k=10)` | `str, int` | `list[dict]` | Búsqueda densa FAISS. Lista vacía si el índice no está listo. |
+| `status()` | — | `dict` | Snapshot del estado. Ver `build_status`. |
 
 ---
 
-## API pública
+### 4.3 `_faiss.py`
 
-### `query(text, top_n)` — búsqueda LSI
+**Propósito:** inicialización del `FaissIndexManager` separada del constructor del `Orchestrator`.
 
-Recuperación semántica basada en el modelo LSI (índice invertido + SVD). Devuelve lista vacía si el modelo no está listo todavía.
+#### `resolve_embedding_dim(model_name) -> int`
 
-```python
-results = orc.query("graph neural networks", top_n=10)
-# -> [{"arxiv_id": "...", "score": 0.94, "title": "...", ...}, ...]
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `model_name` | `str` | Nombre del modelo sentence-transformers. |
+
+**Salida:** dimensión del espacio de embedding (sin cargar los pesos). Devuelve `384` si el modelo no está en el mapa de dimensiones conocidas.
+
+#### `init_faiss_mgr(cfg) -> tuple[FaissIndexManager, bool]`
+
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `cfg` | `OrchestratorConfig` | Configuración del orquestador. |
+
+**Salida:** `(manager, loaded)` donde `loaded` indica si se cargó un índice previo desde disco. Si `loaded=True`, el índice está listo para búsquedas sin rebuild.
+
+---
+
+### 4.4 `_operations.py`
+
+**Propósito:** encapsular las operaciones de negocio que los hilos watchers o la CLI disparan.
+
+#### `do_index(cfg) -> dict`
+
+Ejecuta `new_indexing.IndexingPipeline` (BM25) en modo incremental.
+
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `cfg` | `OrchestratorConfig` | Configuración. |
+
+**Salida:** `dict` con `docs_processed`, `terms_added`, `postings_added`.
+
+#### `do_lsi_rebuild(cfg, lsi_lock, lsi_ready, retriever_holder) -> dict | None`
+
+Construye un nuevo `LSIModel`, lo persiste en disco y actualiza el retriever compartido bajo `lsi_lock`.
+
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `cfg` | `OrchestratorConfig` | Configuración. |
+| `lsi_lock` | `threading.RLock` | Protege `retriever_holder` durante el swap. |
+| `lsi_ready` | `threading.Event` | Se activa al primer modelo exitoso. |
+| `retriever_holder` | `list` | `[LSIRetriever \| None]` de un elemento. |
+
+**Salida:** `dict` con `n_docs`, `n_terms`, `var_explained`, o `None` si no fue posible.
+
+#### `do_embed(cfg, faiss_lock, faiss_mgr, faiss_ready) -> dict`
+
+Ejecuta `EmbeddingPipeline` incremental y recarga el índice FAISS compartido.
+
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `cfg` | `OrchestratorConfig` | Configuración. |
+| `faiss_lock` | `threading.RLock` | Protege `faiss_mgr` durante el reload. |
+| `faiss_mgr` | `FaissIndexManager \| None` | Manager compartido. |
+| `faiss_ready` | `threading.Event` | Se activa cuando el índice tiene vectores. |
+
+**Salida:** `dict` con `chunks_processed`, `batches_processed`, `rebuilds_triggered`.
+
+#### `do_web_search(query, retriever_results, cfg) -> dict`
+
+Evalúa suficiencia local y, si procede, busca en la web combinando los resultados.
+
+| Parámetro | Tipo | Descripción |
+|---|---|---|
+| `query` | `str` | Consulta original del usuario. |
+| `retriever_results` | `list[dict]` | Resultados del LSIRetriever (con campo `score`). |
+| `cfg` | `OrchestratorConfig` | Configuración (umbrales, claves, etc.). |
+
+**Salida:** `dict` con `results`, `web_activated`, `web_results`, `reason`, `query`, `indexed`.
+
+---
+
+### 4.5 `_status.py`
+
+**Propósito:** construir el snapshot de estado del sistema consultando BD, LSI y FAISS.
+
+#### `build_status(cfg, lsi_lock, retriever_holder, faiss_lock, faiss_mgr, lsi_ready, faiss_ready) -> dict`
+
+Consulta todas las fuentes de datos y devuelve un `dict` con las métricas del sistema en tiempo real. Los errores de BD se capturan y devuelven como `-1` para no interrumpir la respuesta.
+
+**Claves del dict devuelto:**
+
+| Clave | Descripción |
+|---|---|
+| `docs_total` | Total de documentos en BD. |
+| `docs_pdf_indexed` | Documentos con texto descargado. |
+| `docs_pdf_pending` | Documentos sin texto. |
+| `docs_not_in_index` | Documentos con texto pero no indexados. |
+| `vocab_size` | Términos únicos en el índice BM25. |
+| `total_postings` | Postings totales en el índice. |
+| `lsi_docs_in_model` | Documentos incluidos en el modelo LSI actual. |
+| `lsi_model_ready` | `True` si el modelo LSI está disponible. |
+| `total_chunks` | Chunks en BD. |
+| `embedded_chunks` | Chunks con embedding. |
+| `pending_chunks` | Chunks sin embedding. |
+| `faiss_vectors` | Vectores en el índice FAISS. |
+| `faiss_index_type` | Tipo de índice FAISS (`"flat"`, `"ivfpq"`, etc.). |
+| `faiss_ready` | `True` si el índice FAISS está listo. |
+| `embed_model` | Nombre del modelo de embedding activo. |
+| `web_threshold` | Umbral de score para activar búsqueda web. |
+| `web_min_docs` | Docs mínimos que deben superar el umbral. |
+| `timestamp` | Marca de tiempo UTC de la consulta. |
+
+---
+
+### 4.6 `cli.py`
+
+**Propósito:** interfaz interactiva. Sin estado propio; recibe todos los callables por parámetro.
+
+#### `run_cli(shutdown, lsi_ready, lsi_min_docs, fn_query, fn_query_web, fn_status, fn_index, fn_rebuild, fn_stop)`
+
+Bucle principal. Bloquea el hilo que lo llama hasta que el usuario escribe `quit` o `shutdown` se activa.
+
+**Funciones de presentación públicas:**
+
+| Función | Entrada | Descripción |
+|---|---|---|
+| `print_banner()` | — | Cabecera del sistema. |
+| `print_help()` | — | Lista de comandos disponibles. |
+| `print_status(s)` | `dict` | Muestra el snapshot de estado formateado, incluyendo sección web. |
+| `print_results(results, query)` | `list[dict], str` | Resultados de una query LSI local. |
+| `print_web_results(output)` | `dict` | Resultados combinados local + web, con indicador de fuente. |
+
+---
+
+### 4.7 `main.py`
+
+**Propósito:** entrypoint del módulo (`python -m backend.orchestrator`).
+
+Parsea argumentos de línea de comandos con `argparse`, construye el `OrchestratorConfig` y arranca el `Orchestrator`.
+
+**Grupos de argumentos:** `crawler`, `indexing (BM25)`, `lsi`, `web search`.
+
+---
+
+### 4.8 `threads/crawler.py`
+
+**Propósito:** mantener el `Crawler` corriendo hasta que `shutdown` se active.
+
+#### `run_crawler_thread(cfg, shutdown) -> None`
+
+Crea un `Crawler` con los parámetros del orquestador, lanza un hilo watchdog que espera `shutdown` y llama a `crawler.stop()`, y ejecuta `crawler.run_forever()`.
+
+---
+
+### 4.9 `threads/indexing.py`
+
+**Propósito:** disparar indexación BM25 cuando hay suficientes PDFs nuevos.
+
+#### `run_indexing_thread(cfg, shutdown, do_index) -> None`
+
+Sondea SQLite cada `index_poll_interval` segundos. Llama a `do_index()` cuando hay `≥ pdf_threshold` documentos con texto descargado pero sin indexar.
+
+`do_index` se recibe inyectado (no lo instancia internamente) para facilitar tests y mantener el módulo sin estado.
+
+---
+
+### 4.10 `threads/lsi.py`
+
+**Propósito:** reconstruir el modelo LSI periódicamente.
+
+#### `run_lsi_rebuild_thread(cfg, shutdown, lsi_lock, lsi_ready, retriever_holder) -> None`
+
+Llama a `do_lsi_rebuild()` inmediatamente al arrancar y luego cada `lsi_rebuild_interval` segundos. Si hay menos de `lsi_min_docs` documentos indexados, omite silenciosamente el rebuild.
+
+---
+
+### 4.11 `threads/embedding.py`
+
+**Propósito:** disparar embedding cuando hay suficientes chunks nuevos.
+
+#### `run_embedding_thread(cfg, shutdown, do_embed) -> None`
+
+Primer chequeo inmediato al arrancar (para retomar chunks pendientes de sesiones anteriores). Luego sondea cada `embed_poll_interval` segundos y llama a `do_embed()` cuando hay `≥ embed_threshold` chunks sin embedding.
+
+---
+
+## 5. Integración de módulos nuevos
+
+### 5.1 `new_indexing` (BM25)
+
+El pipeline de indexación anterior (`backend.indexing.pipeline`) ha sido **reemplazado** por `backend.new_indexing.pipeline` en `_operations.do_index`.
+
+**Diferencias clave:**
+
+| Aspecto | Anterior (`indexing`) | Nuevo (`new_indexing`) |
+|---|---|---|
+| Algoritmo | TF-IDF con postings simples | BM25 (parámetros `k1`, `b`) |
+| Preprocesado | Básico | `TextPreprocessor` con stemming opcional |
+| Parámetros nuevos en config | — | `index_batch_size`, `index_use_stemming`, `index_min_token_len` |
+| Parámetros CLI nuevos | — | `--index-batch`, `--stemming`, `--min-token-len` |
+
+No se requiere ningún cambio en los módulos de retrieval LSI (siguen usando la tabla `postings` con la misma interfaz).
+
+### 5.2 `web_search`
+
+El módulo `backend.web_search` se integra en el orquestador de la siguiente manera:
+
+**Nuevo método en `Orchestrator`:**
+- `query_with_web(text, top_n)` → llama a `query()` + `do_web_search()`.
+
+**Nuevo comando en CLI:**
+- `wsearch <texto>` → llama a `fn_query_web`.
+
+**Nuevo parámetro en `status()`:**
+- `web_threshold`, `web_min_docs` — visibles en el comando `status`.
+
+**Lógica de suficiencia (`web_search.sufficiency.SufficiencyChecker`):**
+- Si al menos `web_min_docs` resultados locales tienen `score ≥ web_threshold` → no se activa la web.
+- En caso contrario → `WebSearcher.search()` → Tavily (con DuckDuckGo como fallback).
+- Los resultados web se guardan en BD y se indexan automáticamente si `web_auto_index=True`.
+
+**Dependencias necesarias para web_search:**
 ```
-
-### `semantic_query(text, top_k)` — búsqueda densa FAISS
-
-Recuperación por similitud vectorial densa. Vectoriza la query con el mismo modelo de embedding, busca en el índice FAISS y enriquece los resultados con texto y metadatos de la BD.
-
-```python
-results = orc.semantic_query("attention mechanism transformer", top_k=10)
-# -> [{"chunk_id": 1234, "score": 0.08, "arxiv_id": "...",
-#      "chunk_index": 3, "text": "...", "title": "..."}, ...]
+pip install tavily-python python-dotenv duckduckgo-search
 ```
-
-Devuelve lista vacía si el índice FAISS no está listo todavía.
-
-### `status()` — snapshot del sistema
-
-```python
-snapshot = orc.status()
-# Claves devueltas:
-# docs_total, docs_pdf_indexed, docs_pdf_pending, docs_not_in_index
-# vocab_size, total_postings
-# lsi_docs_in_model, lsi_model_ready
-# total_chunks, embedded_chunks, pending_chunks
-# faiss_vectors, faiss_index_type, faiss_ready, embed_model
-# timestamp
+Y crear un fichero `.env` en la raíz del proyecto:
+```
+TAVILY_API_KEY=tvly-tu-key-aqui
 ```
 
 ---
 
-## CLI interactiva
+## 6. Librerías utilizadas
 
-Una vez arrancado el sistema, el hilo principal queda en modo interactivo:
+| Librería | Origen | Dónde se usa |
+|---|---|---|
+| `threading` | stdlib | `orchestrator.py`, todos los threads, `_operations.py` |
+| `argparse` | stdlib | `main.py` |
+| `logging` | stdlib | Todos los módulos |
+| `pathlib` | stdlib | `config.py`, `main.py` |
+| `sqlite3` (vía repo) | stdlib | `_status.py`, `threads/indexing.py` |
+| `sentence-transformers` | externa | `_operations.do_embed`, `orchestrator.semantic_query` |
+| `faiss-cpu` | externa | `_faiss.py`, `_operations.do_embed` |
+| `numpy` | externa | FAISS id_map |
+| `scipy` / `sklearn` | externa | `LSIModel` (SVD) |
+| `tavily-python` | externa | `_operations.do_web_search` → `WebSearcher` |
+| `duckduckgo-search` | externa | `_operations.do_web_search` → `DuckDuckGoSearcher` (fallback) |
+| `python-dotenv` | externa | `WebSearcher` (lectura de `TAVILY_API_KEY`) |
 
-```
-==============================================================
-  OmniRetrieve-Engine — Orquestador
-==============================================================
-  Escribe 'help' para ver los comandos disponibles.
+---
 
-query>
-```
-
-### Comandos disponibles
+## 7. Referencia de comandos CLI
 
 | Comando | Descripción |
 |---|---|
-| `query <texto>` | Busca con el modelo LSI (índice invertido + SVD) |
-| `semantic <texto>` | Busca con FAISS (embedding denso) |
-| `<texto>` | Atajo: cualquier texto sin prefijo se trata como query LSI |
-| `status` | Muestra el estado actual del sistema |
-| `index` | Fuerza una indexación TF incremental ahora |
-| `rebuild` | Fuerza una reconstrucción del modelo LSI ahora |
-| `help` | Muestra los comandos disponibles |
-| `quit` / `exit` | Detiene el sistema y sale |
-
-### Ejemplo de sesión
-
-```
-query> transformer attention mechanism
-  Resultados LSI para: 'transformer attention mechanism'
-  ----------------------------------------------------------
-   1. [2301.001]  score=0.9412
-      Attention Is All You Need
-      We propose a new network architecture based solely on attention...
-
-query> semantic efficient attention
-
-  Resultados semanticos para: 'efficient attention'
-  ----------------------------------------------------------
-   1. chunk_id=4821  score=0.04  [2301.001, chunk 3]
-      "Multi-head attention allows the model to attend to different
-       positions simultaneously. Unlike recurrent layers, attention
-       is computed in parallel across the entire sequence..."
-
-query> status
-
-  Estado del sistema  (2024-03-26 17:00:00 UTC)
-  ----------------------------------------------------------
-  Documentos en BD        : 1243
-  PDFs descargados        : 876
-  Pendientes de indexar   : 0
-  Vocabulario (terms)     : 42891
-  Docs en modelo LSI      : 876      listo: si
-  Chunks totales          : 18432
-  Chunks embedidos        : 18432
-  Vectores en FAISS       : 18432    tipo: IndexIVFPQ
-  Modelo de embedding     : all-MiniLM-L6-v2
-
-query> quit
-  Sistema detenido. Hasta luego.
-```
-
----
-
-## Uso programático
-
-```python
-from backend.orchestrator import Orchestrator, OrchestratorConfig
-
-cfg = OrchestratorConfig(
-    pdf_threshold        = 5,
-    lsi_rebuild_interval = 1800,
-    lsi_k                = 100,
-    embed_threshold      = 50,
-    embed_model          = "all-MiniLM-L6-v2",
-)
-
-orc = Orchestrator(cfg)
-orc.start()       # arranca los 4 hilos de fondo
-
-# Consulta LSI
-lsi_results = orc.query("graph neural networks", top_n=5)
-
-# Consulta semantica densa
-dense_results = orc.semantic_query("attention mechanism", top_k=10)
-
-snapshot = orc.status()
-orc.stop()        # parada limpia
-```
-
----
-
-## Logs
-
-Cada hilo identifica sus mensajes con un prefijo:
-
-```
-[crawler]    -- hilo de adquisicion
-[indexing]   -- watcher de indexacion TF
-[lsi]        -- hilo de rebuild del modelo LSI
-[embedding]  -- watcher de embedding y FAISS
-```
-
----
-
-## Notas sobre rate limiting
-
-Si el sistema recibe errores `HTTP 429` de arXiv, aumentar los intervalos del crawler:
-
-```bash
-python -m backend.orchestrator \
-  --download-interval 60 \
-  --batch-size 5 \
-  --pdf-interval 60 \
-  --pdf-batch 3
-```
+| `query <texto>` | Query LSI local. Devuelve los 10 artículos más relevantes. |
+| `wsearch <texto>` | Query LSI + búsqueda web automática si el score es insuficiente. |
+| `<texto>` | Atajo de `query`: cualquier texto sin prefijo se trata como query local. |
+| `status` | Estado completo del sistema (BD, LSI, FAISS, web). |
+| `index` | Fuerza indexación BM25 incremental ahora. |
+| `rebuild` | Fuerza reconstrucción del modelo LSI ahora. |
+| `help` | Lista de comandos disponibles. |
+| `quit` / `exit` | Detiene el sistema y sale. |

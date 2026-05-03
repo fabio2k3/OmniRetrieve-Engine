@@ -51,6 +51,25 @@ def clear_index(db_path: Path = DB_PATH) -> None:
         conn.close()
 
 
+_CHUNK = 900   # por debajo del límite de 999 variables de SQLite
+
+
+def _select_terms_by_words(
+    conn: "sqlite3.Connection",
+    words: list[str],
+) -> dict[str, int]:
+    """SELECT term_id, word FROM terms WHERE word IN (...) en lotes de _CHUNK."""
+    result: dict[str, int] = {}
+    for i in range(0, len(words), _CHUNK):
+        chunk = words[i : i + _CHUNK]
+        ph = ",".join("?" * len(chunk))
+        for r in conn.execute(
+            f"SELECT term_id, word FROM terms WHERE word IN ({ph})", chunk
+        ):
+            result[r["word"]] = r["term_id"]
+    return result
+
+
 def upsert_terms(
     df_map:  dict[str, int],
     db_path: Path = DB_PATH,
@@ -71,15 +90,9 @@ def upsert_terms(
         return {}
 
     words = list(df_map)
-    placeholders = ",".join("?" * len(words))
     conn = get_connection(db_path)
     try:
-        existing: dict[str, int] = {
-            r["word"]: r["term_id"]
-            for r in conn.execute(
-                f"SELECT term_id, word FROM terms WHERE word IN ({placeholders})", words
-            )
-        }
+        existing = _select_terms_by_words(conn, words)
 
         new_terms = [(w, df_map[w]) for w in words if w not in existing]
         if new_terms:
@@ -95,13 +108,7 @@ def upsert_terms(
             )
             conn.commit()
 
-        all_terms: dict[str, int] = {
-            r["word"]: r["term_id"]
-            for r in conn.execute(
-                f"SELECT term_id, word FROM terms WHERE word IN ({placeholders})", words
-            )
-        }
-        return all_terms
+        return _select_terms_by_words(conn, words)
     finally:
         conn.close()
 
@@ -229,14 +236,16 @@ def mark_documents_indexed(
     """
     if not arxiv_ids:
         return
+    now = _now()
     conn = get_connection(db_path)
     try:
-        placeholders = ",".join("?" * len(arxiv_ids))
-        conn.execute(
-            f"UPDATE documents SET indexed_tfidf_at = ? "
-            f"WHERE arxiv_id IN ({placeholders})",
-            (_now(), *arxiv_ids),
-        )
+        for i in range(0, len(arxiv_ids), _CHUNK):
+            chunk = arxiv_ids[i : i + _CHUNK]
+            ph = ",".join("?" * len(chunk))
+            conn.execute(
+                f"UPDATE documents SET indexed_tfidf_at = ? WHERE arxiv_id IN ({ph})",
+                (now, *chunk),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -373,15 +382,18 @@ def get_postings_for_matrix(
         if not doc_ids:
             return [], df_map, doc_ids, term_ids, n_docs
 
-        placeholders = ",".join("?" * len(doc_ids))
-        postings: list[tuple[int, str, int]] = [
-            (r["term_id"], r["doc_id"], r["freq"])
-            for r in conn.execute(
-                f"SELECT term_id, doc_id, freq FROM postings "
-                f"WHERE doc_id IN ({placeholders})",
-                doc_ids,
+        postings: list[tuple[int, str, int]] = []
+        for i in range(0, len(doc_ids), _CHUNK):
+            chunk = doc_ids[i : i + _CHUNK]
+            ph = ",".join("?" * len(chunk))
+            postings.extend(
+                (r["term_id"], r["doc_id"], r["freq"])
+                for r in conn.execute(
+                    f"SELECT term_id, doc_id, freq FROM postings "
+                    f"WHERE doc_id IN ({ph})",
+                    chunk,
+                )
             )
-        ]
         return postings, df_map, doc_ids, term_ids, n_docs
     finally:
         conn.close()
@@ -406,12 +418,15 @@ def get_document_metadata(
     conn = get_connection(db_path)
     try:
         if arxiv_ids:
-            placeholders = ",".join("?" * len(arxiv_ids))
-            rows = conn.execute(
-                f"SELECT arxiv_id, title, authors, abstract, pdf_url "
-                f"FROM documents WHERE arxiv_id IN ({placeholders})",
-                arxiv_ids,
-            ).fetchall()
+            rows = []
+            for i in range(0, len(arxiv_ids), _CHUNK):
+                chunk = arxiv_ids[i : i + _CHUNK]
+                ph = ",".join("?" * len(chunk))
+                rows.extend(conn.execute(
+                    f"SELECT arxiv_id, title, authors, abstract, pdf_url "
+                    f"FROM documents WHERE arxiv_id IN ({ph})",
+                    chunk,
+                ).fetchall())
         else:
             rows = conn.execute(
                 "SELECT arxiv_id, title, authors, abstract, pdf_url "

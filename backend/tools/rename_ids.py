@@ -295,54 +295,78 @@ def _rename_in_transaction(
 
     Devuelve (docs_updated, chunks_updated, postings_updated).
 
-    Estrategia para claves foráneas
-    --------------------------------
-    SQLite no soporta ON UPDATE CASCADE por defecto.  En lugar de
-    deshabilitar FK globalmente, insertamos temporalmente con el ID
-    nuevo, reasignamos los hijos y borramos el registro antiguo.
-    Esto respeta la integridad referencial en todo momento.
-    """
-    docs_updated = chunks_updated = postings_updated = 0
+    Estrategia de rendimiento
+    -------------------------
+    En lugar de iterar doc a doc (N round-trips), cargamos el plan completo
+    en una tabla temporal y ejecutamos 3 UPDATEs/INSERTs bulk mediante JOINs.
+    Para ~10 000 docs esto pasa de minutos a segundos.
 
-    # Desactivar FK temporalmente para poder hacer UPDATE directo en PKs.
-    # Es seguro porque:
-    #  1. Todo ocurre en una sola transacción EXCLUSIVE.
-    #  2. Actualizamos documentos + hijos de forma coordinada.
-    #  3. Al hacer COMMIT la integridad queda restaurada.
-    conn.execute("PRAGMA foreign_keys = OFF")
+    La tabla ``_id_map`` actúa de lookup:  old_id → new_id.
+
+    Postings requiere INSERT OR REPLACE + DELETE (no UPDATE) porque doc_id
+    forma parte de la PK compuesta (term_id, doc_id) y SQLite evalúa la
+    restricción UNIQUE fila a fila, provocando conflictos intermedios.
+    """
+    # ── PRAGMAs de rendimiento para esta sesión ───────────────────────────────
+    # synchronous=OFF es seguro aquí: si el proceso muere a mitad existe el
+    # backup. journal_mode ya es WAL (definido en get_connection).
+    conn.execute("PRAGMA foreign_keys  = OFF")
+    conn.execute("PRAGMA synchronous   = OFF")
+    conn.execute("PRAGMA cache_size    = -65536")   # 64 MB de caché de páginas
+    conn.execute("PRAGMA temp_store    = MEMORY")
 
     try:
         with conn:   # transacción — ROLLBACK automático si hay excepción
-            for old_id, new_id in plan.items():
-                # 1. Documento
-                conn.execute(
-                    "UPDATE documents SET arxiv_id = ? WHERE arxiv_id = ?",
-                    (new_id, old_id),
-                )
-                docs_updated += conn.execute(
-                    "SELECT changes()"
-                ).fetchone()[0]
 
-                # 2. Chunks
-                cur = conn.execute(
-                    "UPDATE chunks SET arxiv_id = ? WHERE arxiv_id = ?",
-                    (new_id, old_id),
+            # ── 1. Tabla temporal con el plan completo ────────────────────────
+            conn.execute("""
+                CREATE TEMP TABLE _id_map (
+                    old_id TEXT PRIMARY KEY,
+                    new_id TEXT NOT NULL
                 )
-                chunks_updated += conn.execute(
-                    "SELECT changes()"
-                ).fetchone()[0]
+            """)
+            conn.executemany(
+                "INSERT INTO _id_map (old_id, new_id) VALUES (?, ?)",
+                plan.items(),
+            )
 
-                # 3. Postings
-                conn.execute(
-                    "UPDATE postings SET doc_id = ? WHERE doc_id = ?",
-                    (new_id, old_id),
-                )
-                postings_updated += conn.execute(
-                    "SELECT changes()"
-                ).fetchone()[0]
+            # ── 2. documents (PK directa, UPDATE simple) ──────────────────────
+            conn.execute("""
+                UPDATE documents
+                SET    arxiv_id = (SELECT new_id FROM _id_map WHERE old_id = arxiv_id)
+                WHERE  arxiv_id IN (SELECT old_id FROM _id_map)
+            """)
+            docs_updated = conn.execute("SELECT changes()").fetchone()[0]
+
+            # ── 3. chunks (FK a documents.arxiv_id) ───────────────────────────
+            conn.execute("""
+                UPDATE chunks
+                SET    arxiv_id = (SELECT new_id FROM _id_map WHERE old_id = arxiv_id)
+                WHERE  arxiv_id IN (SELECT old_id FROM _id_map)
+            """)
+            chunks_updated = conn.execute("SELECT changes()").fetchone()[0]
+
+            # ── 4. postings (PK compuesta — no se puede UPDATE directo) ───────
+            # INSERT OR REPLACE copia las filas con el nuevo doc_id.
+            # REPLACE gana si (term_id, new_id) ya existía (migración parcial).
+            conn.execute("""
+                INSERT OR REPLACE INTO postings (term_id, doc_id, freq)
+                SELECT p.term_id, m.new_id, p.freq
+                FROM   postings p
+                JOIN   _id_map  m ON p.doc_id = m.old_id
+            """)
+            # DELETE de las filas antiguas en una sola pasada
+            conn.execute("""
+                DELETE FROM postings
+                WHERE  doc_id IN (SELECT old_id FROM _id_map)
+            """)
+            postings_updated = conn.execute("SELECT changes()").fetchone()[0]
+
+            conn.execute("DROP TABLE _id_map")
 
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA synchronous  = FULL")
 
     return docs_updated, chunks_updated, postings_updated
 

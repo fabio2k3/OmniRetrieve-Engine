@@ -335,26 +335,30 @@ def get_chunks_by_ids(
     if not chunk_ids:
         return []
 
-    placeholders = ",".join("?" * len(chunk_ids))
+    _CHUNK = 900
     conn = get_connection(db_path)
     try:
-        rows = conn.execute(
-            f"""
-            SELECT c.id        AS chunk_id,
-                   c.arxiv_id,
-                   c.chunk_index,
-                   c.text,
-                   c.char_count,
-                   d.title,
-                   d.authors,
-                   d.abstract,
-                   d.pdf_url
-            FROM   chunks    c
-            JOIN   documents d ON d.arxiv_id = c.arxiv_id
-            WHERE  c.id IN ({placeholders})
-            """,
-            chunk_ids,
-        ).fetchall()
+        rows = []
+        for i in range(0, len(chunk_ids), _CHUNK):
+            batch = chunk_ids[i : i + _CHUNK]
+            ph = ",".join("?" * len(batch))
+            rows.extend(conn.execute(
+                f"""
+                SELECT c.id        AS chunk_id,
+                       c.arxiv_id,
+                       c.chunk_index,
+                       c.text,
+                       c.char_count,
+                       d.title,
+                       d.authors,
+                       d.abstract,
+                       d.pdf_url
+                FROM   chunks    c
+                JOIN   documents d ON d.arxiv_id = c.arxiv_id
+                WHERE  c.id IN ({ph})
+                """,
+                batch,
+            ).fetchall())
     finally:
         conn.close()
 
