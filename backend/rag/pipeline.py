@@ -84,6 +84,46 @@ class RAGPipeline:
 
         return payload
 
+
+    def generate_from_results(
+        self,
+        query:      str,
+        results:    list,
+        max_chunks: int = 5,
+        max_chars:  int = 400,
+    ) -> dict:
+        """
+        Genera una respuesta LLM a partir de resultados ya recuperados y
+        rerankeados (sin hacer retrieval propio).
+
+        Usado por el pipeline unificado de do_pipeline_ask(), donde el
+        HybridRetriever + CrossEncoder ya produjeron los chunks finales.
+
+        Parametros
+        ----------
+        query      : pregunta original del usuario.
+        results    : lista de RetrievalResult ya ordenados por relevancia.
+        max_chunks : maximo de chunks a incluir en el contexto.
+        max_chars  : maximo de caracteres por chunk en el contexto.
+
+        Returns
+        -------
+        dict con claves: query, answer, sources.
+        """
+        context = self.context_builder.build(
+            results,
+            max_chunks=max_chunks,
+            max_chars=max_chars,
+        )
+        prompt = self.prompt_builder.build(query=query, context=context)
+        answer = self.generator.generate(prompt)
+
+        return {
+            "query":   query,
+            "answer":  answer,
+            "sources": self.context_builder.build_sources(results, max_sources=max_chunks),
+        }
+
     def _retrieve_and_rank(self, query: str, top_k: int, candidate_k: int) -> list[RetrievalResult]:
         if not query or not query.strip():
             return []
