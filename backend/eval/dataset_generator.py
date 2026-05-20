@@ -3,36 +3,34 @@ dataset_generator.py
 ====================
 Genera automáticamente un EvalDataset a partir de chunks reales de la BD.
 
-Estrategia de muestreo
-----------------------
-1. Extrae chunks de la tabla `chunks` de forma estratificada por documento
-   (``arxiv_id``), para que el dataset cubra diversidad temática y no quede
-   dominado por un solo paper muy largo.
-2. Por cada chunk muestreado crea dos casos:
-   · **Exact**    → extrae 1-3 oraciones del cuerpo del chunk (evitando el
-                    inicio/fin para no coincidir con la frontera de chunk) y
-                    las usa directamente como query.
-   · **Semantic** → toma el mismo fragmento y lo parafrasea con el LLM local
-                    (Ollama).  Si la paráfrasis no supera el filtro de calidad
-                    se omite ese caso semántico sin abortar la generación.
-3. Guarda el dataset como JSON con ``EvalDataset.save()``.
+Tipos de casos generados
+-------------------------
+exact     — fragmento literal del chunk como query.
+            Prueba retrieval léxico. Rápido, sin LLM.
+
+semantic  — paráfrasis del fragmento (LLM).
+            Prueba retrieval semántico (FAISS/dense).
+
+generated — pregunta real de usuario generada por LLM a partir del chunk.
+            Es el tipo más representativo para RAG: prueba si el sistema
+            responde preguntas como las haría un usuario real, no si
+            recupera fragmentos de texto.
 
 Uso rápido
 ----------
 >>> from backend.eval.dataset_generator import DatasetGenerator
->>> gen = DatasetGenerator(sample_size=50, include_semantic=True)
->>> dataset = gen.generate()
->>> dataset.save(Path("backend/data/eval/dataset_v1.json"))
->>> print(dataset)
-EvalDataset(total=95, exact=50, semantic=45, generated_at=...)
+>>> from pathlib import Path
 
-Parámetros importantes
------------------------
-sample_size      : número de chunks a muestrear (casos exact = sample_size).
-include_semantic : si False, solo genera casos exact (más rápido, sin LLM).
-min_chunk_chars  : descarta chunks demasiado cortos para extraer un fragmento.
-fragment_sentences: oraciones a extraer del chunk como semilla de la query.
-seed             : semilla aleatoria para reproducibilidad.
+>>> # Solo preguntas reales (recomendado para eval RAG)
+>>> gen = DatasetGenerator(sample_size=50, include_generated=True,
+...                        include_exact=False, include_semantic=False)
+>>> ds = gen.generate()
+>>> ds.save(Path("backend/data/eval/dataset_rag.json"))
+
+>>> # Dataset completo para comparar los tres tipos
+>>> gen = DatasetGenerator(sample_size=50, include_generated=True,
+...                        include_exact=True, include_semantic=True)
+>>> ds = gen.generate()
 """
 
 from __future__ import annotations
@@ -42,19 +40,16 @@ import random
 import re
 import sqlite3
 from pathlib import Path
-from typing import Iterator
 
 from backend.database.schema import DB_PATH, get_connection
 from .paraphraser import Paraphraser
+from .query_generator import QueryGenerator
 from .schema import EvalCase, EvalDataset
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constantes
-# ---------------------------------------------------------------------------
-_MIN_CHUNK_CHARS   = 200   # chunk mínimo para poder extraer un fragmento útil
-_SENT_RE           = re.compile(
+_MIN_CHUNK_CHARS = 200
+_SENT_RE = re.compile(
     r'(?<=[.!?])\s+(?=[A-Z"\'\(0-9])'
     r'|(?<=;)\s+'
 )
@@ -65,37 +60,26 @@ _SENT_RE           = re.compile(
 # ---------------------------------------------------------------------------
 
 def _split_sentences(text: str) -> list[str]:
-    """División simple de oraciones (misma lógica que chunker.py)."""
     return [s.strip() for s in _SENT_RE.split(text) if s.strip()]
 
 
 def _extract_fragment(text: str, n_sentences: int = 2) -> str | None:
-    """
-    Extrae ``n_sentences`` oraciones del cuerpo del chunk (no del inicio ni
-    del final) para que la query no coincida trivialmente con el borde del
-    chunk.
-
-    Devuelve None si el chunk tiene menos oraciones de las necesarias para
-    elegir un fragmento interior.
-    """
-    sents = _split_sentences(text)
-    # Necesitamos al menos 2 oraciones de margen a cada lado
-    margin = 1
+    """Extrae oraciones del interior del chunk (evitando bordes)."""
+    sents   = _split_sentences(text)
+    margin  = 1
     interior = sents[margin: len(sents) - margin]
     if len(interior) < n_sentences:
-        # Fallback: usar las primeras n_sentences si no hay interior
         if len(sents) >= n_sentences:
             interior = sents[:n_sentences]
         else:
             return None
-    # Empezar en una posición aleatoria dentro del interior
-    start = random.randint(0, max(0, len(interior) - n_sentences))
+    start    = random.randint(0, max(0, len(interior) - n_sentences))
     fragment = " ".join(interior[start: start + n_sentences])
     return fragment if len(fragment) >= 40 else None
 
 
 # ---------------------------------------------------------------------------
-# Muestreo estratificado desde la BD
+# Muestreo estratificado
 # ---------------------------------------------------------------------------
 
 def _sample_chunks_stratified(
@@ -104,25 +88,12 @@ def _sample_chunks_stratified(
     min_chars:   int,
     seed:        int,
 ) -> list[sqlite3.Row]:
-    """
-    Muestrea ``sample_size`` chunks de forma estratificada por ``arxiv_id``.
-
-    Algoritmo
-    ---------
-    1. Obtiene todos los arxiv_ids distintos que tienen chunks con
-       char_count >= min_chars.
-    2. Calcula cuántos chunks tomar por documento (≈ sample_size / n_docs),
-       con un mínimo de 1.
-    3. Para cada documento toma una muestra aleatoria de sus chunks.
-    """
     rng = random.Random(seed)
-
     arxiv_ids: list[str] = [
         row[0]
         for row in conn.execute(
             """
-            SELECT DISTINCT arxiv_id
-            FROM chunks
+            SELECT DISTINCT arxiv_id FROM chunks
             WHERE char_count >= ? OR (char_count IS NULL AND length(text) >= ?)
             ORDER BY arxiv_id
             """,
@@ -131,46 +102,37 @@ def _sample_chunks_stratified(
     ]
 
     if not arxiv_ids:
-        log.warning("[dataset_gen] No se encontraron chunks en la BD con char_count >= %d", min_chars)
+        log.warning("[dataset_gen] No se encontraron chunks con char_count >= %d", min_chars)
         return []
 
-    n_docs          = len(arxiv_ids)
-    per_doc         = max(1, sample_size // n_docs)
-    extra           = sample_size - per_doc * n_docs  # los primeros `extra` docs toman uno más
+    n_docs   = len(arxiv_ids)
+    per_doc  = max(1, sample_size // n_docs)
+    extra    = sample_size - per_doc * n_docs
 
-    log.info(
-        "[dataset_gen] %d documentos encontrados; ~%d chunks/doc (extra=%d)",
-        n_docs, per_doc, extra,
-    )
-
-    sampled: list[sqlite3.Row] = []
     rng.shuffle(arxiv_ids)
+    sampled: list[sqlite3.Row] = []
 
     for i, arxiv_id in enumerate(arxiv_ids):
         quota = per_doc + (1 if i < extra else 0)
-        rows: list[sqlite3.Row] = conn.execute(
+        rows  = conn.execute(
             """
-            SELECT id, arxiv_id, chunk_index, text, char_count,
-                   d.title AS title
+            SELECT c.id, c.arxiv_id, c.chunk_index, c.text,
+                   c.char_count, d.title AS title
             FROM   chunks c
             JOIN   documents d USING (arxiv_id)
             WHERE  c.arxiv_id = ?
               AND  (c.char_count >= ? OR (c.char_count IS NULL AND length(c.text) >= ?))
-            ORDER  BY c.chunk_index
+            ORDER BY c.chunk_index
             """,
             (arxiv_id, min_chars, min_chars),
         ).fetchall()
 
         if not rows:
             continue
-
-        chosen = rng.sample(rows, min(quota, len(rows)))
-        sampled.extend(chosen)
-
+        sampled.extend(rng.sample(rows, min(quota, len(rows))))
         if len(sampled) >= sample_size:
             break
 
-    # Recortar si nos pasamos (puede ocurrir con el extra)
     rng.shuffle(sampled)
     return sampled[:sample_size]
 
@@ -181,50 +143,68 @@ def _sample_chunks_stratified(
 
 class DatasetGenerator:
     """
-    Genera un EvalDataset de casos exact y/o semantic desde la BD.
+    Genera un EvalDataset con casos exact, semantic y/o generated.
 
     Parámetros
     ----------
-    sample_size       : número de chunks a muestrear. Cada chunk produce
-                        1 caso exact y (opcionalmente) 1 caso semantic.
-    include_semantic  : si True, genera también casos de paráfrasis con LLM.
-    min_chunk_chars   : tamaño mínimo del chunk para ser elegible.
-    fragment_sentences: oraciones del chunk a usar como semilla de la query.
-    paraphrase_model  : modelo Ollama para la paráfrasis.
-    paraphrase_temp   : temperatura del modelo de paráfrasis.
-    paraphrase_retries: intentos antes de descartar un caso semantic.
-    seed              : semilla aleatoria.
-    db_path           : ruta a la BD SQLite (por defecto la del sistema).
+    sample_size         : chunks a muestrear. Define el máximo de casos
+                          por tipo (uno por chunk si el LLM no falla).
+    include_exact       : genera casos con fragmento literal como query.
+    include_semantic    : genera casos con paráfrasis del fragmento (LLM).
+    include_generated   : genera casos con queries reales de usuario (LLM).
+                          Recomendado para eval RAG end-to-end.
+    min_chunk_chars     : tamaño mínimo del chunk para ser elegible.
+    fragment_sentences  : oraciones a extraer como semilla (exact/semantic).
+    paraphrase_model    : modelo Ollama para paráfrasis.
+    query_gen_model     : modelo Ollama para generación de queries.
+    model_temperature   : temperatura compartida para LLM calls.
+    max_retries         : intentos antes de descartar un caso LLM.
+    seed                : semilla aleatoria.
+    db_path             : ruta a la BD SQLite.
     """
 
     def __init__(
         self,
         sample_size:        int   = 50,
-        include_semantic:   bool  = True,
+        include_exact:      bool  = True,
+        include_semantic:   bool  = False,
+        include_generated:  bool  = True,
         min_chunk_chars:    int   = _MIN_CHUNK_CHARS,
         fragment_sentences: int   = 2,
         paraphrase_model:   str   = "llama3.2:3b",
-        paraphrase_temp:    float = 0.55,
-        paraphrase_retries: int   = 3,
+        query_gen_model:    str   = "llama3.2:3b",
+        model_temperature:  float = 0.4,
+        max_retries:        int   = 3,
         seed:               int   = 42,
         db_path:            Path  = DB_PATH,
     ) -> None:
         self.sample_size        = sample_size
+        self.include_exact      = include_exact
         self.include_semantic   = include_semantic
+        self.include_generated  = include_generated
         self.min_chunk_chars    = min_chunk_chars
         self.fragment_sentences = fragment_sentences
         self.paraphrase_model   = paraphrase_model
-        self.paraphrase_temp    = paraphrase_temp
-        self.paraphrase_retries = paraphrase_retries
+        self.query_gen_model    = query_gen_model
+        self.model_temperature  = model_temperature
+        self.max_retries        = max_retries
         self.seed               = seed
         self.db_path            = db_path
 
-        self._paraphraser: Paraphraser | None = None
+        self._paraphraser:     Paraphraser    | None = None
+        self._query_generator: QueryGenerator | None = None
+
         if include_semantic:
             self._paraphraser = Paraphraser(
                 model=paraphrase_model,
-                temperature=paraphrase_temp,
-                max_retries=paraphrase_retries,
+                temperature=model_temperature,
+                max_retries=max_retries,
+            )
+        if include_generated:
+            self._query_generator = QueryGenerator(
+                model=query_gen_model,
+                temperature=model_temperature,
+                max_retries=max_retries,
             )
 
     # ------------------------------------------------------------------
@@ -235,19 +215,13 @@ class DatasetGenerator:
         """
         Genera y devuelve el EvalDataset completo.
 
-        Proceso
-        -------
-        1. Muestrea chunks de la BD (estratificado por documento).
-        2. Por cada chunk:
-           a. Extrae un fragmento interior como semilla.
-           b. Crea un EvalCase de tipo ``exact``.
-           c. Si ``include_semantic``, genera una paráfrasis y crea un
-              EvalCase de tipo ``semantic`` (se omite si la paráfrasis falla).
-        3. Construye y devuelve un EvalDataset.
+        Por cada chunk muestreado puede crear hasta 3 casos:
+        · exact     — fragmento literal (sin LLM)
+        · semantic  — paráfrasis del fragmento (LLM)
+        · generated — query real de usuario (LLM)
         """
         random.seed(self.seed)
         conn = get_connection(self.db_path)
-
         try:
             chunks = _sample_chunks_stratified(
                 conn, self.sample_size, self.min_chunk_chars, self.seed
@@ -256,17 +230,15 @@ class DatasetGenerator:
             conn.close()
 
         if not chunks:
-            log.error("[dataset_gen] No hay chunks disponibles. ¿Está la BD poblada?")
+            log.error("[dataset_gen] Sin chunks. ¿Está la BD poblada?")
             return EvalDataset(cases=[], db_path=str(self.db_path),
                                generator_cfg=self._cfg())
 
         log.info("[dataset_gen] %d chunks muestreados → generando casos…", len(chunks))
 
         cases: list[EvalCase] = []
-        exact_counter    = 0
-        semantic_counter = 0
-        skipped_fragment = 0
-        skipped_paraph   = 0
+        counters = {"exact": 0, "semantic": 0, "generated": 0}
+        skipped  = {"fragment": 0, "semantic": 0, "generated": 0}
 
         for row in chunks:
             chunk_id    = row["id"]
@@ -278,57 +250,75 @@ class DatasetGenerator:
             except (IndexError, KeyError):
                 title = arxiv_id
 
-            fragment = _extract_fragment(text, self.fragment_sentences)
-            if fragment is None:
-                skipped_fragment += 1
-                log.debug("[dataset_gen] chunk_id=%d sin fragmento interior; se omite.", chunk_id)
-                continue
+            meta = {"title": title, "char_count": len(text)}
 
-            # ── Caso exact ──────────────────────────────────────────────
-            exact_id = f"exact_{exact_counter:04d}"
-            cases.append(EvalCase(
-                case_id=exact_id,
-                case_type="exact",
-                query=fragment,
-                expected_chunk_id=chunk_id,
-                expected_arxiv_id=arxiv_id,
-                expected_chunk_index=chunk_index,
-                source_text=text,
-                fragment_used=fragment,
-                paraphrase_model=None,
-                metadata={"title": title, "char_count": len(text)},
-            ))
-            exact_counter += 1
-
-            # ── Caso semantic ────────────────────────────────────────────
-            if self._paraphraser is not None:
-                paraphrase = self._paraphraser.paraphrase(fragment)
-                if paraphrase is None:
-                    skipped_paraph += 1
-                    log.debug(
-                        "[dataset_gen] chunk_id=%d paráfrasis fallida; se omite caso semantic.",
-                        chunk_id,
-                    )
+            # ── Exact ────────────────────────────────────────────────────
+            if self.include_exact:
+                fragment = _extract_fragment(text, self.fragment_sentences)
+                if fragment is None:
+                    skipped["fragment"] += 1
                 else:
-                    sem_id = f"semantic_{semantic_counter:04d}"
                     cases.append(EvalCase(
-                        case_id=sem_id,
-                        case_type="semantic",
-                        query=paraphrase,
+                        case_id=f"exact_{counters['exact']:04d}",
+                        case_type="exact",
+                        query=fragment,
                         expected_chunk_id=chunk_id,
                         expected_arxiv_id=arxiv_id,
                         expected_chunk_index=chunk_index,
                         source_text=text,
                         fragment_used=fragment,
-                        paraphrase_model=self.paraphrase_model,
-                        metadata={"title": title, "char_count": len(text)},
+                        metadata=meta,
                     ))
-                    semantic_counter += 1
+                    counters["exact"] += 1
+
+            # ── Semantic ─────────────────────────────────────────────────
+            if self.include_semantic and self._paraphraser:
+                fragment = _extract_fragment(text, self.fragment_sentences)
+                if fragment:
+                    paraphrase = self._paraphraser.paraphrase(fragment)
+                    if paraphrase is None:
+                        skipped["semantic"] += 1
+                    else:
+                        cases.append(EvalCase(
+                            case_id=f"semantic_{counters['semantic']:04d}",
+                            case_type="semantic",
+                            query=paraphrase,
+                            expected_chunk_id=chunk_id,
+                            expected_arxiv_id=arxiv_id,
+                            expected_chunk_index=chunk_index,
+                            source_text=text,
+                            fragment_used=fragment,
+                            paraphrase_model=self.paraphrase_model,
+                            metadata=meta,
+                        ))
+                        counters["semantic"] += 1
+
+            # ── Generated ────────────────────────────────────────────────
+            if self.include_generated and self._query_generator:
+                query = self._query_generator.generate(text)
+                if query is None:
+                    skipped["generated"] += 1
+                    log.debug("[dataset_gen] chunk_id=%d query generada fallida.", chunk_id)
+                else:
+                    cases.append(EvalCase(
+                        case_id=f"generated_{counters['generated']:04d}",
+                        case_type="generated",
+                        query=query,
+                        expected_chunk_id=chunk_id,
+                        expected_arxiv_id=arxiv_id,
+                        expected_chunk_index=chunk_index,
+                        source_text=text,
+                        fragment_used=text[:500],  # extracto del chunk usado como contexto
+                        paraphrase_model=self.query_gen_model,
+                        metadata=meta,
+                    ))
+                    counters["generated"] += 1
 
         log.info(
-            "[dataset_gen] Generación completada: exact=%d semantic=%d "
-            "skipped_fragment=%d skipped_paraph=%d",
-            exact_counter, semantic_counter, skipped_fragment, skipped_paraph,
+            "[dataset_gen] Completado: exact=%d semantic=%d generated=%d "
+            "skipped(frag=%d sem=%d gen=%d)",
+            counters["exact"], counters["semantic"], counters["generated"],
+            skipped["fragment"], skipped["semantic"], skipped["generated"],
         )
 
         return EvalDataset(
@@ -337,19 +327,15 @@ class DatasetGenerator:
             generator_cfg=self._cfg(),
         )
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def _cfg(self) -> dict:
-        """Devuelve los parámetros de configuración para auditoría."""
         return {
-            "sample_size":        self.sample_size,
-            "include_semantic":   self.include_semantic,
-            "min_chunk_chars":    self.min_chunk_chars,
-            "fragment_sentences": self.fragment_sentences,
-            "paraphrase_model":   self.paraphrase_model if self.include_semantic else None,
-            "paraphrase_temp":    self.paraphrase_temp  if self.include_semantic else None,
-            "paraphrase_retries": self.paraphrase_retries,
-            "seed":               self.seed,
+            "sample_size":       self.sample_size,
+            "include_exact":     self.include_exact,
+            "include_semantic":  self.include_semantic,
+            "include_generated": self.include_generated,
+            "min_chunk_chars":   self.min_chunk_chars,
+            "fragment_sentences":self.fragment_sentences,
+            "paraphrase_model":  self.paraphrase_model if self.include_semantic else None,
+            "query_gen_model":   self.query_gen_model  if self.include_generated else None,
+            "seed":              self.seed,
         }

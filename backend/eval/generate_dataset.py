@@ -1,7 +1,7 @@
 """
 generate_dataset.py
 ===================
-Script CLI para generar un EvalDataset desde la BD del sistema.
+CLI para generar un EvalDataset desde la BD del sistema.
 
 Uso
 ---
@@ -9,25 +9,27 @@ Uso
 
 Opciones
 --------
-  --sample-size   INT    Número de chunks a muestrear         (default: 50)
-  --no-semantic          Solo genera casos exact (sin LLM)
-  --model         STR    Modelo Ollama para la paráfrasis      (default: llama3.2:3b)
-  --output        PATH   Ruta de salida del JSON               (default: backend/data/eval/dataset.json)
-  --min-chars     INT    Tamaño mínimo del chunk               (default: 200)
-  --fragment-sents INT   Oraciones a extraer como fragmento    (default: 2)
-  --seed          INT    Semilla aleatoria                     (default: 42)
+  --sample-size    INT   Chunks a muestrear                         (default: 50)
+  --exact                Incluir casos exact (fragmento literal)
+  --semantic             Incluir casos semantic (paráfrasis LLM)
+  --generated            Incluir casos generated (queries reales LLM)  ← NUEVO
+  --model          STR   Modelo Ollama para LLM calls               (default: llama3.2:3b)
+  --output         PATH  Ruta de salida JSON                        (default: backend/data/eval/dataset.json)
+  --min-chars      INT   Tamaño mínimo del chunk                    (default: 200)
+  --fragment-sents INT   Oraciones a extraer como semilla           (default: 2)
+  --seed           INT   Semilla aleatoria                          (default: 42)
   --verbose              Activa logging DEBUG
 
 Ejemplos
 --------
-    # Solo exact (rápido, sin LLM)
-    python -m backend.eval.generate_dataset --sample-size 100 --no-semantic
+    # Solo queries reales (recomendado para eval RAG)
+    python -m backend.eval.generate_dataset --generated --sample-size 50
 
-    # Exact + semántico con llama3.2
-    python -m backend.eval.generate_dataset --sample-size 50
+    # Dataset completo con los tres tipos
+    python -m backend.eval.generate_dataset --exact --semantic --generated --sample-size 50
 
-    # Dataset pequeño de prueba
-    python -m backend.eval.generate_dataset --sample-size 10 --output /tmp/test_dataset.json
+    # Rápido, sin LLM (solo exact)
+    python -m backend.eval.generate_dataset --exact --sample-size 100
 """
 
 from __future__ import annotations
@@ -40,26 +42,24 @@ from pathlib import Path
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Genera un EvalDataset (exact + semantic) desde la BD del sistema.",
+        description="Genera un EvalDataset desde la BD del sistema.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--sample-size",    type=int,  default=50,
-                        help="Número de chunks a muestrear.")
-    parser.add_argument("--no-semantic",    action="store_true",
-                        help="Omite la generación de casos semánticos (sin LLM).")
+    parser.add_argument("--sample-size",    type=int,  default=50)
+    parser.add_argument("--exact",          action="store_true",
+                        help="Incluir casos exact (fragmento literal del chunk).")
+    parser.add_argument("--semantic",       action="store_true",
+                        help="Incluir casos semantic (paráfrasis LLM).")
+    parser.add_argument("--generated",      action="store_true",
+                        help="Incluir casos generated (query real de usuario, LLM).")
     parser.add_argument("--model",          type=str,  default="llama3.2:3b",
-                        help="Modelo Ollama para paráfrasis.")
+                        help="Modelo Ollama para LLM calls (semantic y generated).")
     parser.add_argument("--output",         type=Path,
-                        default=Path("backend/data/eval/dataset.json"),
-                        help="Ruta de salida del JSON.")
-    parser.add_argument("--min-chars",      type=int,  default=200,
-                        help="Tamaño mínimo del chunk para ser elegible.")
-    parser.add_argument("--fragment-sents", type=int,  default=2,
-                        help="Oraciones a extraer del chunk como semilla.")
-    parser.add_argument("--seed",           type=int,  default=42,
-                        help="Semilla aleatoria.")
-    parser.add_argument("--verbose",        action="store_true",
-                        help="Activa logging DEBUG.")
+                        default=Path("backend/data/eval/dataset.json"))
+    parser.add_argument("--min-chars",      type=int,  default=200)
+    parser.add_argument("--fragment-sents", type=int,  default=2)
+    parser.add_argument("--seed",           type=int,  default=42)
+    parser.add_argument("--verbose",        action="store_true")
     return parser.parse_args()
 
 
@@ -72,25 +72,40 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    # Importación diferida para que el logging esté configurado primero
+    # Si no se selecciona ningún tipo, activar generated por defecto
+    include_exact     = args.exact
+    include_semantic  = args.semantic
+    include_generated = args.generated
+    if not any([include_exact, include_semantic, include_generated]):
+        print("[eval] No se especificó tipo. Activando --generated por defecto.")
+        include_generated = True
+
     from backend.eval.dataset_generator import DatasetGenerator
 
     gen = DatasetGenerator(
         sample_size=args.sample_size,
-        include_semantic=not args.no_semantic,
+        include_exact=include_exact,
+        include_semantic=include_semantic,
+        include_generated=include_generated,
         min_chunk_chars=args.min_chars,
         fragment_sentences=args.fragment_sents,
         paraphrase_model=args.model,
+        query_gen_model=args.model,
         seed=args.seed,
     )
 
-    print(f"[eval] Iniciando generación: sample_size={args.sample_size}, "
-          f"semantic={'sí' if not args.no_semantic else 'no'}")
+    types_str = " + ".join(
+        t for t, v in [("exact", include_exact),
+                       ("semantic", include_semantic),
+                       ("generated", include_generated)]
+        if v
+    )
+    print(f"[eval] Generando dataset: tipos=[{types_str}] sample_size={args.sample_size}")
 
     dataset = gen.generate()
 
     if len(dataset) == 0:
-        print("[eval] ERROR: El dataset está vacío. Verifica que la BD tiene chunks.", file=sys.stderr)
+        print("[eval] ERROR: El dataset está vacío. ¿Está la BD poblada?", file=sys.stderr)
         return 1
 
     dataset.save(args.output)

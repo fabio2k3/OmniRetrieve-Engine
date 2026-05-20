@@ -38,15 +38,17 @@ def aggregate(hits: list[RawHit], top_k: int) -> AggregatedMetrics:
 
     Devuelve
     --------
-    AggregatedMetrics con desgloses overall / exact / semantic.
+    AggregatedMetrics con desgloses overall / exact / semantic / generated.
     El desglose de un tipo es None si no hay casos de ese tipo.
     """
-    exact_hits    = [h for h in hits if h.case_type == "exact"]
-    semantic_hits = [h for h in hits if h.case_type == "semantic"]
+    exact_hits     = [h for h in hits if h.case_type == "exact"]
+    semantic_hits  = [h for h in hits if h.case_type == "semantic"]
+    generated_hits = [h for h in hits if h.case_type == "generated"]
 
     return AggregatedMetrics(
         top_k=top_k,
         overall=_metric_set(hits, top_k),
-        exact=_metric_set(exact_hits, top_k) if exact_hits else None,
-        semantic=_metric_set(semantic_hits, top_k) if semantic_hits else None,
+        exact=_metric_set(exact_hits,     top_k) if exact_hits     else None,
+        semantic=_metric_set(semantic_hits,  top_k) if semantic_hits  else None,
+        generated=_metric_set(generated_hits, top_k) if generated_hits else None,
     )

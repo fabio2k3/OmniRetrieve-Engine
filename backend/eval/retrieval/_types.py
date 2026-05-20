@@ -70,18 +70,20 @@ class AggregatedMetrics:
     """
     Métricas agregadas de una corrida de evaluación completa.
 
-    Desglosadas por tipo de caso para detectar diferencias entre
-    la evaluación léxica (exact) y la semántica (semantic).
+    Desglosadas por tipo de caso.
 
     Campos
     ------
-    top_k    : ventana de evaluación.
-    overall  : métricas sobre todos los casos.
-    exact    : métricas solo sobre casos "exact"    (None si no hay).
-    semantic : métricas solo sobre casos "semantic" (None si no hay).
+    top_k     : ventana de evaluación.
+    overall   : métricas sobre todos los casos.
+    exact     : métricas solo sobre casos "exact"     (None si no hay).
+    semantic  : métricas solo sobre casos "semantic"  (None si no hay).
+    generated : métricas solo sobre casos "generated" (None si no hay).
+                Este es el tipo más representativo del uso real del sistema.
     """
 
-    top_k:    int
-    overall:  MetricSet
-    exact:    MetricSet | None = None
-    semantic: MetricSet | None = None
+    top_k:     int
+    overall:   MetricSet
+    exact:     MetricSet | None = None
+    semantic:  MetricSet | None = None
+    generated: MetricSet | None = None

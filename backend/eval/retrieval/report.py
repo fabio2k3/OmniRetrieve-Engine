@@ -59,13 +59,23 @@ def format_summary(metrics: AggregatedMetrics, retriever_name: str = "") -> str:
         lines.append(_fmt_metric_set("Exact   ", metrics.exact))
 
     if metrics.semantic is not None:
-        lines.append(_fmt_metric_set("Semantic", metrics.semantic))
+        lines.append(_fmt_metric_set("Semantic ", metrics.semantic))
+
+    if metrics.generated is not None:
+        lines.append(_fmt_metric_set("Generated", metrics.generated))
 
     if metrics.exact and metrics.semantic:
         delta = metrics.semantic.hit_at_k - metrics.exact.hit_at_k
         sign  = "+" if delta >= 0 else ""
         lines.append(
-            f"  Δ Hit@K (semantic − exact): {sign}{delta:.4f}  ({sign}{delta * 100:.1f}%)\n"
+            f"  Δ Hit@K (semantic − exact):   {sign}{delta:.4f}  ({sign}{delta * 100:.1f}%)\n"
+        )
+
+    if metrics.exact and metrics.generated:
+        delta = metrics.generated.hit_at_k - metrics.exact.hit_at_k
+        sign  = "+" if delta >= 0 else ""
+        lines.append(
+            f"  Δ Hit@K (generated − exact):  {sign}{delta:.4f}  ({sign}{delta * 100:.1f}%)\n"
         )
 
     lines.append("=" * 52)
