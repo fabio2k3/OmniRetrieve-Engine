@@ -45,6 +45,8 @@ class OrchestratorConfig:
     lsi_rebuild_interval : segundos entre reconstrucciones del modelo LSI.
     lsi_k                : número de componentes latentes del SVD.
     lsi_min_docs         : mínimo de documentos indexados para construir el modelo.
+    lsi_doc_candidates   : documentos LSI (por similitud coseno) a expandir a chunks
+                           reales antes de devolver resultados al HybridRetriever.
 
     Embedding / FAISS
     -----------------
@@ -133,6 +135,7 @@ class OrchestratorConfig:
     lsi_rebuild_interval: float = 3600.0
     lsi_k:                int   = 100
     lsi_min_docs:         int   = 10
+    lsi_doc_candidates:   int   = 20    # docs LSI a expandir a chunks por query
 
     # ── embedding / FAISS ────────────────────────────────────────────────────
     embed_model:         str   = "all-MiniLM-L6-v2"
@@ -168,7 +171,7 @@ class OrchestratorConfig:
     index_min_token_len: int   = 3       # longitud mínima de token
 
     # ── HybridRetriever (LSI sparse + FAISS dense, fusión RRF) ───────────────
-    hybrid_candidate_k: int   = 10    # candidatos por rama (sparse y dense) antes de RRF
+    hybrid_candidate_k: int   = 50    # candidatos por rama (sparse y dense) antes de RRF
     hybrid_rrf_k:       int   = 60    # constante RRF (mayor = fusión más suave)
     hybrid_parallel:    bool  = True  # ejecutar ambas ramas en paralelo (ThreadPoolExecutor)
 

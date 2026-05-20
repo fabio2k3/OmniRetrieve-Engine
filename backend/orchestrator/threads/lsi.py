@@ -50,14 +50,20 @@ def run_lsi_rebuild_thread(
         int(cfg.lsi_rebuild_interval), cfg.lsi_k,
     )
 
-    # ── Paso 1: carga rápida del modelo existente ────────────────────────────
+    # ── Paso 1: carga del modelo existente ──────────────────────────────────
+    # Si ya existe un .pkl en disco, solo se carga — sin rebuild.
+    # El primer rebuild ocurrirá después del primer intervalo (lsi_rebuild_interval).
+    # Si no existe .pkl (primera ejecución), se hace un rebuild para crearlo.
     if cfg.model_path.exists():
         _fast_load(cfg, lsi_lock, lsi_ready, retriever_holder)
+        log.info(
+            "[lsi] Modelo cargado desde disco. "
+            "Próximo rebuild en %ds.",
+            int(cfg.lsi_rebuild_interval),
+        )
     else:
-        log.info("[lsi] No hay modelo previo en disco — se hara rebuild completo.")
-
-    # ── Paso 2: rebuild completo (actualiza con datos recientes) ─────────────
-    do_lsi_rebuild(cfg, lsi_lock, lsi_ready, retriever_holder)
+        log.info("[lsi] No hay modelo previo — rebuild inicial para crearlo.")
+        do_lsi_rebuild(cfg, lsi_lock, lsi_ready, retriever_holder)
 
     # ── Ciclo periódico ───────────────────────────────────────────────────────
     while not shutdown.is_set():

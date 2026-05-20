@@ -115,7 +115,7 @@ def do_lsi_rebuild(
         stats = model.build(db_path=cfg.db_path)
         model.save(path=cfg.model_path)
 
-        new_retriever = LSIRetriever(model=model)
+        new_retriever = LSIRetriever(model=model, doc_candidates=cfg.lsi_doc_candidates)
         new_retriever.load(model_path=cfg.model_path, db_path=cfg.db_path)
 
         with lsi_lock:
@@ -348,8 +348,9 @@ def build_hybrid_retriever(
     Construye el ``HybridRetriever`` combinando LSI (sparse) y FAISS (dense)
     con fusión RRF.
 
-    El ``LSIRetriever`` del orquestador se envuelve en ``LSIRetrieverAdapter``
-    para que sea compatible con ``RetrieverProtocol`` (devuelve RetrievalResult).
+    Usa el ``LSIRetriever`` compartido del orquestador directamente, ya que
+    implementa ``RetrieverProtocol`` devolviendo ``list[RetrievalResult]`` con
+    chunk_ids enteros reales.
     El retriever denso usa el mismo ``FaissIndexManager`` compartido del orquestador.
 
     Parámetros
@@ -359,7 +360,6 @@ def build_hybrid_retriever(
     lsi_lock         : RLock que protege el acceso al holder.
     faiss_mgr        : FaissIndexManager compartido.
     """
-    from backend.retrieval.lsi_retriever import LSIRetrieverAdapter
     from backend.retrieval.embedding_retriever import EmbeddingRetriever
     from backend.retrieval.hybrid_retriever import HybridRetriever
 
@@ -372,7 +372,8 @@ def build_hybrid_retriever(
             "Espera a que lsi_ready esté activo antes de construir el HybridRetriever."
         )
 
-    sparse = LSIRetrieverAdapter(lsi_retriever)
+    # LSIRetriever implementa RetrieverProtocol directamente (sin adaptador)
+    sparse = lsi_retriever
     dense  = EmbeddingRetriever(
         faiss_mgr  = faiss_mgr,
         db_path    = cfg.db_path,

@@ -125,13 +125,10 @@ Si al ejecutar `ollama pull` recibes *"El término 'ollama' no se reconoce..."*:
 ---
 
 ## Ejecución
-
-### Opción A — Lanzador principal (recomendado)
-
 Desde la raíz del proyecto:
 
 ```bash
-python -m backend.orchestrator
+python -m backend.orchestrator.main
 ```
 
 Abre Streamlit automáticamente en `http://localhost:8501`.
@@ -139,18 +136,11 @@ Abre Streamlit automáticamente en `http://localhost:8501`.
 Opciones útiles:
 
 ```bash
-python -m backend.orchestrator --port 8080
-python -m backend.orchestrator --no-browser
-python -m backend.orchestrator --lsi-interval 3600
-python -m backend.orchestrator --lsi-k 200
+python -m backend.orchestrator.main --port 8080
+python -m backend.orchestrator.main --no-browser
+python -m backend.orchestrator.main --lsi-interval 3600
+python -m backend.orchestrator.main --lsi-k 200
 ```
-
-### Opción B — Streamlit directo
-
-```bash
-streamlit run frontend/frontend/app.py
-```
-
 ---
 
 ## Primer arranque
