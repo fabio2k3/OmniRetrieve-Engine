@@ -1,16 +1,31 @@
 """
 lsi_retriever.py
 ================
-Fase online del módulo LSI.
+Retriever LSI que implementa RetrieverProtocol correctamente.
 
-Recibe una query en texto libre, la convierte a un vector TF-IDF
-en el vocabulario del modelo, la proyecta al espacio latente y devuelve
-los K artículos más relevantes por similitud coseno.
+Cambios respecto a la versión anterior
+---------------------------------------
+· retrieve() devuelve list[RetrievalResult] con chunk_ids enteros reales
+  (no strings sintéticos), eliminando la necesidad de LSIRetrieverAdapter.
+· La vectorización de queries se delega a QueryVectorizer (lsi_query.py).
+· La expansión documento → chunks reales se hace contra la tabla chunks de
+  la BD, convirtiendo LSI de nivel-documento a nivel-chunk.
+
+Diseño de la expansión documento → chunk
+-----------------------------------------
+LSI calcula similitud coseno a nivel de documento (arxiv_id). Para ser
+compatible con el RRF del HybridRetriever (que opera a nivel de chunk_id
+entero), cada documento recuperado se expande a sus chunks reales:
+
+    1. Top-N documentos por similitud coseno.
+    2. Consulta a la BD: todos los chunks de esos documentos.
+    3. Cada chunk hereda el score coseno del documento al que pertenece.
+    4. Se ordenan por (score DESC, chunk_index ASC) y se devuelven top_n.
 """
 
 from __future__ import annotations
+
 import logging
-import math
 import time
 from pathlib import Path
 
@@ -20,230 +35,181 @@ from sklearn.metrics.pairwise import cosine_similarity
 from backend.database.schema import DB_PATH, get_connection
 from backend.indexing.preprocessor import TextPreprocessor
 from .lsi_model import LSIModel, MODEL_PATH
+from .lsi_query import QueryVectorizer, build_word_index
+from .protocols import RetrievalResult, RetrieverProtocol
 
 log = logging.getLogger(__name__)
 
+# Cuántos documentos candidatos recuperar internamente antes de expandir a chunks.
+_DEFAULT_DOC_CANDIDATES = 20
 
-class LSIRetriever:
+
+class LSIRetriever(RetrieverProtocol):
     """
-    Motor de recuperación LSI. Carga el modelo y responde consultas.
+    Retriever LSI compatible con RetrieverProtocol.
 
-    Uso
-    ---
-        retriever = LSIRetriever()
-        retriever.load()
-        results = retriever.retrieve("attention transformer mechanisms", top_n=10)
+    Devuelve list[RetrievalResult] con chunk_ids enteros reales,
+    listo para fusionarse con EmbeddingRetriever en HybridRetriever.
+
+    Parámetros
+    ----------
+    model         : LSIModel (si None, se crea uno vacío para cargar con load()).
+    doc_candidates: documentos LSI a expandir a chunks antes de devolver top_n.
     """
 
-    def __init__(self, model: LSIModel | None = None) -> None:
-        self.model        = model or LSIModel()
-        self._meta:       dict[str, dict] | None = None
-        # word → (row_idx, df)  — construido al cargar el modelo
-        self._word_index: dict[str, tuple[int, int]] = {}
-        self._preprocessor = TextPreprocessor()
+    def __init__(
+        self,
+        model:          LSIModel | None = None,
+        doc_candidates: int = _DEFAULT_DOC_CANDIDATES,
+    ) -> None:
+        self._model          = model or LSIModel()
+        self._doc_candidates = doc_candidates
+        self._vectorizer:    QueryVectorizer | None = None
+        self._db_path:       Path = DB_PATH
 
-    def load(self, model_path: Path = MODEL_PATH, db_path: Path = DB_PATH) -> None:
+    # ------------------------------------------------------------------
+    # Carga
+    # ------------------------------------------------------------------
+
+    def load(
+        self,
+        model_path: Path = MODEL_PATH,
+        db_path:    Path = DB_PATH,
+    ) -> None:
         """
-        Carga el modelo .pkl y prepara las estructuras de consulta.
+        Carga el modelo LSI y construye las estructuras de consulta.
 
         Parámetros
         ----------
         model_path : ruta al .pkl generado en la fase offline.
-        db_path    : ruta a la BD para cargar metadatos y vocabulario.
+        db_path    : BD SQLite para leer vocabulario y chunks.
         """
-        self.model.load(model_path)
-        self._word_index = self._build_word_index(db_path)
-        self._meta       = self._load_meta(db_path)
+        self._db_path = Path(db_path)
+        self._model.load(model_path)
+        word_index       = build_word_index(self._model, db_path=self._db_path)
+        self._vectorizer = QueryVectorizer(
+            model=self._model,
+            word_index=word_index,
+            preprocessor=TextPreprocessor(),
+        )
         log.info(
-            "[LSIRetriever] Listo. %d documentos | %d términos en vocabulario.",
-            len(self.model.doc_ids), len(self._word_index),
+            "[LSIRetriever] Listo. %d documentos | %d términos.",
+            len(self._model.doc_ids),
+            len(word_index),
         )
 
-    def _build_word_index(self, db_path: Path) -> dict[str, tuple[int, int]]:
+    # ------------------------------------------------------------------
+    # RetrieverProtocol
+    # ------------------------------------------------------------------
+
+    def retrieve(self, query: str, top_n: int = 20) -> list[RetrievalResult]:
         """
-        Construye el mapa word → (row_idx, df) para vectorizar queries.
+        Recupera los top_n chunks más relevantes para la query.
 
-        row_idx es la posición del term_id en self.model.term_ids,
-        que es exactamente el orden de filas de la matriz usada en build().
-        df es la frecuencia de documento del corpus, guardada en df_map.
-        """
-        if not self.model.term_ids:
-            return {}
-
-        # SQLite tiene un límite de 999 variables por consulta (SQLITE_LIMIT_VARIABLE_NUMBER).
-        # Si el vocabulario es grande, la consulta se parte en lotes para no superarlo.
-        _CHUNK_SIZE = 900
-        term_ids = self.model.term_ids
-        rows = []
-        conn = get_connection(db_path)
-        try:
-            for offset in range(0, len(term_ids), _CHUNK_SIZE):
-                chunk = term_ids[offset : offset + _CHUNK_SIZE]
-                placeholders = ",".join("?" * len(chunk))
-                rows.extend(
-                    conn.execute(
-                        f"SELECT term_id, word FROM terms WHERE term_id IN ({placeholders})",
-                        chunk,
-                    ).fetchall()
-                )
-        finally:
-            conn.close()
-
-        term_id_to_row = {tid: i for i, tid in enumerate(self.model.term_ids)}
-        index: dict[str, tuple[int, int]] = {}
-        for r in rows:
-            tid = r["term_id"]
-            row_idx = term_id_to_row.get(tid)
-            df      = self.model.df_map.get(tid, 1)
-            if row_idx is not None:
-                index[r["word"]] = (row_idx, df)
-        return index
-
-    def _vectorize_query(self, query: str) -> np.ndarray:
-        """
-        Convierte la query a un vector TF-IDF alineado con el vocabulario
-        del modelo (mismo orden de filas que la matriz usada en build()).
-
-        Usa TextPreprocessor para tokenizar de forma consistente con
-        la fase de indexación.
-
-        Para cada token presente en el vocabulario:
-            TF  = log(1 + freq_en_query)
-            IDF = log((N + 1) / (df_corpus + 1))   ← df real del corpus
-        """
-        if self.model.docs_latent is None:
-            raise RuntimeError("Modelo no cargado. Llama a load() primero.")
-
-        n_terms = len(self.model.term_ids)
-        n_docs  = len(self.model.doc_ids)
-        vec     = np.zeros(n_terms, dtype=np.float32)
-
-        tokens = self._preprocessor.process(query)
-        # contar frecuencias en la query
-        freq_in_query: dict[str, int] = {}
-        for t in tokens:
-            freq_in_query[t] = freq_in_query.get(t, 0) + 1
-
-        for token, freq in freq_in_query.items():
-            entry = self._word_index.get(token)
-            if entry is None:
-                continue
-            row_idx, df = entry
-            tf  = math.log(1 + freq)
-            idf = math.log((n_docs + 1) / (df + 1))
-            vec[row_idx] = tf * idf
-
-        return vec
-
-    def retrieve(self, query: str, top_n: int = 10) -> list[dict]:
-        """
-        Devuelve los top_n documentos más relevantes para la query.
+        Implementa RetrieverProtocol: devuelve list[RetrievalResult] con
+        chunk_ids enteros reales obtenidos de la tabla chunks de la BD.
 
         Pasos
         -----
-        1. Tokeniza y vectoriza la query en el espacio TF-IDF del vocabulario.
-        2. Proyecta al espacio latente con model.project_query().
-        3. Calcula similitud coseno contra todos los documentos indexados.
-        4. Devuelve los top_n con metadatos (title, authors, abstract, url).
+        1. Vectoriza la query (TF-IDF en vocabulario LSI).
+        2. Proyecta al espacio latente.
+        3. Calcula similitud coseno contra documentos indexados.
+        4. Toma los top doc_candidates documentos.
+        5. Expande cada documento a sus chunks reales.
+        6. Devuelve top_n ordenados por (score DESC, chunk_index ASC).
 
-        Lanza RuntimeError si el modelo no ha sido cargado.
+        Lanza RuntimeError si load() no fue llamado.
         """
-        if self.model.docs_latent is None:
-            raise RuntimeError("Modelo no cargado. Llama a load() primero.")
+        if self._vectorizer is None:
+            raise RuntimeError("LSIRetriever no inicializado. Llama a load() primero.")
+
+        if not query or not query.strip():
+            log.debug("[LSIRetriever] Query vacía; se devuelve lista vacía.")
+            return []
 
         t0 = time.monotonic()
 
-        q_tfidf  = self._vectorize_query(query)
-        q_latent = self.model.project_query(q_tfidf)
+        q_tfidf  = self._vectorizer.vectorize(query)
+        q_latent = self._model.project_query(q_tfidf)
         scores   = cosine_similarity(
-            q_latent.reshape(1, -1), self.model.docs_latent
+            q_latent.reshape(1, -1), self._model.docs_latent
         ).flatten()
-        top_idx  = np.argsort(scores)[::-1][:top_n]
 
-        elapsed_ms = (time.monotonic() - t0) * 1000
+        n_candidates = min(self._doc_candidates, len(scores))
+        top_idx      = np.argsort(scores)[::-1][:n_candidates]
+        scored_docs  = [
+            (self._model.doc_ids[i], float(scores[i]))
+            for i in top_idx
+            if float(scores[i]) > 0.0
+        ]
+
         log.debug(
-            "[LSIRetriever] query='%s…' top_score=%.4f tiempo=%.1fms",
-            query[:40], scores[top_idx[0]] if len(top_idx) else 0.0, elapsed_ms,
+            "[LSIRetriever] query='%s…' doc_candidates=%d top_score=%.4f time=%.1fms",
+            query[:40], len(scored_docs),
+            scored_docs[0][1] if scored_docs else 0.0,
+            (time.monotonic() - t0) * 1000,
         )
 
-        results = []
-        for i in top_idx:
-            aid      = self.model.doc_ids[i]
-            meta     = self._meta.get(aid, {}) if self._meta else {}
-            abstract = meta.get("abstract") or ""
-            results.append({
-                "score":    float(scores[i]),
-                "arxiv_id": aid,
-                "title":    meta.get("title", ""),
-                "authors":  meta.get("authors", ""),
-                "abstract": abstract[:300] + ("…" if len(abstract) > 300 else ""),
-                "url":      meta.get("pdf_url", ""),
-            })
-        return results
+        if not scored_docs:
+            return []
+
+        return self._expand_to_chunks(scored_docs, top_n=top_n)
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Internos
     # ------------------------------------------------------------------
 
-    def _load_meta(self, db_path: Path) -> dict[str, dict]:
-        """Carga metadatos de documentos indexados desde la BD."""
-        conn = get_connection(db_path)
+    def _expand_to_chunks(
+        self,
+        scored_docs: list[tuple[str, float]],
+        top_n: int,
+    ) -> list[RetrievalResult]:
+        """
+        Expande (arxiv_id, score) a RetrievalResult con chunk_ids reales.
+        Cada chunk hereda el score coseno del documento padre.
+        """
+        arxiv_ids = [aid for aid, _ in scored_docs]
+        score_map = {aid: score for aid, score in scored_docs}
+
+        placeholders = ",".join("?" * len(arxiv_ids))
+        conn = get_connection(self._db_path)
         try:
             rows = conn.execute(
-                "SELECT arxiv_id, title, authors, abstract, pdf_url "
-                "FROM documents WHERE pdf_downloaded = 1"
+                f"""
+                SELECT c.id        AS chunk_id,
+                       c.arxiv_id,
+                       c.chunk_index,
+                       c.text,
+                       d.title,
+                       d.authors,
+                       d.pdf_url
+                FROM   chunks    c
+                JOIN   documents d USING (arxiv_id)
+                WHERE  c.arxiv_id IN ({placeholders})
+                """,
+                arxiv_ids,
             ).fetchall()
         finally:
             conn.close()
-        return {r["arxiv_id"]: dict(r) for r in rows}
 
-# ---------------------------------------------------------------------------
-# Adaptador: LSIRetriever → RetrieverProtocol
-# ---------------------------------------------------------------------------
-
-class LSIRetrieverAdapter:
-    """
-    Envuelve LSIRetriever para que cumpla RetrieverProtocol.
-
-    LSIRetriever.retrieve() devuelve list[dict] con claves:
-        score, arxiv_id, title, authors, abstract, url
-
-    RetrieverProtocol.retrieve() debe devolver list[RetrievalResult]
-    (nivel chunk). Como LSI opera a nivel de documento, cada resultado
-    se mapea a un RetrievalResult con chunk_index=0 y text=abstract.
-
-    Parameters
-    ----------
-    retriever : LSIRetriever ya cargado (load() ya llamado).
-    """
-
-    def __init__(self, retriever: "LSIRetriever") -> None:
-        self._retriever = retriever
-
-    def retrieve(self, query: str, top_n: int = 20) -> list:
-        """
-        Llama a LSIRetriever.retrieve() y convierte los dicts a
-        RetrievalResult para ser compatible con HybridRetriever.
-        """
-        from backend.retrieval.protocols import RetrievalResult
-
-        raw: list[dict] = self._retriever.retrieve(query, top_n=top_n)
-        results = []
-        for i, r in enumerate(raw):
-            arxiv_id = r.get("arxiv_id", "")
+        results: list[RetrievalResult] = []
+        for row in rows:
+            aid = row["arxiv_id"]
             results.append(
                 RetrievalResult(
-                    chunk_id    = f"{arxiv_id}__lsi__{i}",
-                    arxiv_id    = arxiv_id,
-                    chunk_index = 0,
-                    text        = r.get("abstract") or r.get("title") or "",
-                    score       = float(r.get("score", 0.0)),
-                    score_type  = "cosine",
-                    metadata    = {
-                        "title":   r.get("title", ""),
-                        "authors": r.get("authors", ""),
-                        "url":     r.get("url", ""),
+                    chunk_id=row["chunk_id"],
+                    arxiv_id=aid,
+                    chunk_index=row["chunk_index"],
+                    text=row["text"],
+                    score=score_map.get(aid, 0.0),
+                    score_type="cosine_lsi",
+                    metadata={
+                        "title":   row["title"]   or "",
+                        "authors": row["authors"] or "",
+                        "pdf_url": row["pdf_url"] or "",
                     },
                 )
             )
-        return results
+
+        results.sort(key=lambda r: (-r.score, r.chunk_index))
+        return results[:top_n]
