@@ -84,7 +84,8 @@ def _parse_args() -> argparse.Namespace:
     g = p.add_argument_group("lsi")
     g.add_argument("--lsi-interval", type=float, default=_D.lsi_rebuild_interval)
     g.add_argument("--lsi-k",        type=int,   default=_D.lsi_k)
-    g.add_argument("--lsi-min-docs", type=int,   default=_D.lsi_min_docs)
+    g.add_argument("--lsi-min-docs",       type=int,   default=_D.lsi_min_docs)
+    g.add_argument("--lsi-doc-candidates", type=int,   default=_D.lsi_doc_candidates)
 
     # Embedding / FAISS
     g = p.add_argument_group("embedding / FAISS")
@@ -171,6 +172,7 @@ def main() -> None:
         "lsi_rebuild_interval": args.lsi_interval,
         "lsi_k":                args.lsi_k,
         "lsi_min_docs":         args.lsi_min_docs,
+        "lsi_doc_candidates":   args.lsi_doc_candidates,
         "embed_model":          args.embed_model,
         "embed_batch_size":     args.embed_batch,
         "embed_poll_interval":  args.embed_poll,
