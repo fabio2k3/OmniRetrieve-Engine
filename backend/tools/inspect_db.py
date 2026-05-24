@@ -205,8 +205,8 @@ def _embedding_data(conn) -> dict:
     )
 
 
-def _lsi_data() -> dict:
-    """Lee metadatos del modelo LSI desde disco (no de la BD)."""
+def _lsi_data(db_path: Path = DB_PATH) -> dict:
+    """Lee metadatos del modelo LSI desde disco y desde la tabla lsi_log."""
     try:
         from backend.retrieval.lsi_model import MODEL_PATH
         lsi_path = MODEL_PATH
@@ -214,18 +214,64 @@ def _lsi_data() -> dict:
         lsi_path = DATA_DIR / "models" / "lsi_model.pkl"
 
     result = {"path": lsi_path, "size": _file_size(lsi_path)}
+
+    # Datos estructurales desde el pkl (svd, doc_ids, k, term_ids…)
     if lsi_path.exists():
         try:
             import joblib
             model_data = joblib.load(str(lsi_path))
-            result["n_docs"]       = len(model_data.get("doc_ids", []))
-            result["k"]            = model_data.get("k", "—")
-            result["var_explained"]= model_data.get("var_explained", None)
-            result["built_at"]     = model_data.get("built_at", None)
+            result["n_docs"] = len(model_data.get("doc_ids", []))
+            result["k"]      = model_data.get("k", "—")
         except Exception:
             pass
+
+    # var_explained y built_at viven en lsi_log, NO en el pkl
+    try:
+        conn = get_connection(db_path)
+        row = conn.execute(
+            "SELECT built_at, var_explained FROM lsi_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row:
+            result["var_explained"] = row["var_explained"]
+            result["built_at"]      = row["built_at"]
+    except Exception:
+        pass
+
     return result
 
+
+
+
+def _web_data(conn) -> dict:
+    """Lee estadísticas de búsqueda web desde web_search_log y web_search_results."""
+    try:
+        total_results = conn.execute(
+            "SELECT COUNT(*) FROM web_search_results"
+        ).fetchone()[0]
+        total_searches = conn.execute(
+            "SELECT COUNT(*) FROM web_search_log"
+        ).fetchone()[0]
+        last_search = conn.execute(
+            "SELECT searched_at, query, results_found, results_saved "
+            "FROM web_search_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        by_source = conn.execute(
+            "SELECT source, COUNT(*) as n FROM web_search_results "
+            "GROUP BY source ORDER BY n DESC"
+        ).fetchall()
+        avg_score = conn.execute(
+            "SELECT AVG(score) FROM web_search_results"
+        ).fetchone()[0] or 0.0
+    except Exception:
+        return {}
+    return dict(
+        total_results=total_results,
+        total_searches=total_searches,
+        last_search=last_search,
+        by_source=[dict(r) for r in by_source],
+        avg_score=avg_score,
+    )
 
 def _faiss_paths() -> tuple[Path, Path]:
     idx  = DATA_DIR / "faiss" / "index.faiss"
@@ -244,10 +290,11 @@ def show_summary(db_path: Path = DB_PATH) -> None:
         cr  = _crawler_data(conn)
         idx = _index_data(conn)
         emb = _embedding_data(conn)
+        web = _web_data(conn)
     finally:
         conn.close()
 
-    lsi        = _lsi_data()
+    lsi        = _lsi_data(db_path=db_path)
     faiss_idx, faiss_map = _faiss_paths()
     db_size    = _file_size(db_path)
     now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -332,6 +379,28 @@ def show_summary(db_path: Path = DB_PATH) -> None:
     else:
         _row("Estado", f"{YELLOW}Modelo LSI no encontrado{RESET}")
 
+
+    # ── Web Search ───────────────────────────────────────────────────────────
+    _header("WEB SEARCH", "🌐")
+    if web:
+        _row("Búsquedas realizadas", f"{BOLD}{web['total_searches']:,}{RESET}")
+        _row("URLs en caché",        f"{web['total_results']:,}")
+        _row("Score promedio",       f"{web['avg_score']:.3f}" if web["total_results"] else f"{DIM}—{RESET}")
+        if web.get("last_search"):
+            ls = web["last_search"]
+            q_preview = (ls["query"] or "")[:45]
+            _row("Última búsqueda",
+                 f"{_time_ago(ls['searched_at'])}  {DIM}'{q_preview}'{RESET}")
+            _row("  → encontrados / guardados",
+                 f"{ls['results_found']} / {GREEN}{ls['results_saved']}{RESET}")
+        if web.get("by_source"):
+            sources = "  ".join(
+                f"{CYAN}{s['source']}{RESET}({s['n']})" for s in web["by_source"]
+            )
+            _row("Fuentes", sources)
+    else:
+        _row("Estado", f"{DIM}Sin búsquedas web registradas{RESET}")
+
     print(f"\n{BOLD}{'═' * (W + 4)}{RESET}")
     print(f"  {DIM}Comandos útiles:{RESET}")
     print(f"  {DIM}  --index       detalle del índice TF{RESET}")
@@ -339,6 +408,7 @@ def show_summary(db_path: Path = DB_PATH) -> None:
     print(f"  {DIM}  --crawl-log N historial del crawler{RESET}")
     print(f"  {DIM}  --errors N    documentos con error{RESET}")
     print(f"  {DIM}  --categories  distribución por categoría{RESET}")
+    print(f"  {DIM}  --web N       últimas N búsquedas web{RESET}")
     print(f"  {DIM}  --watch       refresco automático{RESET}")
     print(f"{BOLD}{'═' * (W + 4)}{RESET}\n")
 
@@ -784,6 +854,79 @@ def show_chunk_text(arxiv_id: str, chunk_idx: int = 0, db_path: Path = DB_PATH) 
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def show_web_stats(n: int = 20, db_path: Path = DB_PATH) -> None:
+    """Detalle de las búsquedas web: historial y últimos resultados guardados."""
+    conn = get_connection(db_path)
+    try:
+        web = _web_data(conn)
+        log_rows = conn.execute(
+            "SELECT searched_at, query, results_found, results_saved "
+            "FROM web_search_log ORDER BY id DESC LIMIT ?",
+            (n,),
+        ).fetchall()
+        recent_results = conn.execute(
+            "SELECT searched_at, query, title, url, score, source "
+            "FROM web_search_results ORDER BY searched_at DESC LIMIT ?",
+            (n,),
+        ).fetchall()
+        by_source = conn.execute(
+            "SELECT source, COUNT(*) as n, AVG(score) as avg_score "
+            "FROM web_search_results GROUP BY source ORDER BY n DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    print(f"\n{BOLD}{'═' * (W + 4)}{RESET}")
+    print(f"{BOLD}  Web Search — Detalle{RESET}")
+    print(f"{BOLD}{'═' * (W + 4)}{RESET}\n")
+
+    if not web:
+        print(f"  {YELLOW}Sin datos de búsqueda web todavía.{RESET}\n")
+        return
+
+    # ── Estadísticas generales ───────────────────────────────────────────────
+    _header("RESUMEN", "📊")
+    _row("Búsquedas totales",  f"{BOLD}{web['total_searches']:,}{RESET}")
+    _row("URLs en caché",      f"{web['total_results']:,}")
+    _row("Score promedio",     f"{web['avg_score']:.3f}" if web["total_results"] else "—")
+
+    if by_source:
+        print(f"\n  {BOLD}Por fuente{RESET}")
+        print(_sep())
+        max_n = by_source[0]["n"] if by_source else 1
+        for row in by_source:
+            bar = _bar(row["n"], max_n, width=16)
+            print(f"  {CYAN}{row['source']:<22}{RESET}  "
+                  f"{row['n']:>6,} URLs  {bar}  "
+                  f"{DIM}avg score {row['avg_score']:.3f}{RESET}")
+
+    # ── Historial de búsquedas ────────────────────────────────────────────────
+    if log_rows:
+        _header(f"HISTORIAL DE BÚSQUEDAS (últimas {len(log_rows)})", "🕐")
+        print(f"  {DIM}{'Fecha':<22}{'Encontrados':>13}{'Guardados':>11}  Query{RESET}")
+        print(_sep("·"))
+        for r in log_rows:
+            q_preview = (r["query"] or "")[:40]
+            found_col = f"{r['results_found']:,}"
+            saved_col = f"{GREEN}{r['results_saved']:,}{RESET}" if r["results_saved"] else f"{DIM}0{RESET}"
+            print(f"  {_fmt_ts(r['searched_at']):<22}{found_col:>13}{saved_col:>20}  "
+                  f"{DIM}{q_preview}{RESET}")
+
+    # ── Últimos resultados guardados ─────────────────────────────────────────
+    if recent_results:
+        _header(f"ÚLTIMAS {len(recent_results)} URLs GUARDADAS", "🔗")
+        print(f"  {DIM}{'Fecha':<22}{'Score':>7}  {'Fuente':<16}  Título{RESET}")
+        print(_sep("·"))
+        for r in recent_results:
+            title = (r["title"] or r["url"] or "")[:45]
+            score_col = f"{r['score']:.3f}" if r["score"] is not None else "—"
+            print(f"  {_fmt_ts(r['searched_at']):<22}{score_col:>7}  "
+                  f"{CYAN}{(r['source'] or 'web'):<16}{RESET}  {title}")
+
+    print(f"\n{BOLD}{'═' * (W + 4)}{RESET}\n")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="OmniRetrieve — Inspección completa de la BD",
@@ -801,6 +944,7 @@ def main() -> None:
     p.add_argument("--crawl-log",  type=int,  metavar="N",  help="Historial del crawler (últimas N runs)")
     p.add_argument("--errors",     type=int,  metavar="N",  help="Documentos con error de descarga")
     p.add_argument("--categories", action="store_true",     help="Distribución por categoría")
+    p.add_argument("--web",        type=int,  metavar="N",  help="Últimas N búsquedas web y resultados guardados")
     p.add_argument("--watch",      action="store_true",     help="Refresco automático cada 5s")
     args = p.parse_args()
 
@@ -828,6 +972,8 @@ def main() -> None:
         show_errors(args.errors, db_path=db)
     elif args.categories:
         show_categories(db_path=db)
+    elif args.web:
+        show_web_stats(args.web, db_path=db)
     elif args.watch:
         try:
             while True:

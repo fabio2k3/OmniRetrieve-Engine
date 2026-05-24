@@ -9,7 +9,7 @@ Qué elimina
 BD:
   • chunks            — fragmentos de texto y sus embeddings (BLOB)
   • postings          — índice invertido de frecuencias
-  • terms             — vocabulario BM25
+  • terms             — vocabulario TF-IDF
   • index_meta        — metadatos de la última indexación
   • faiss_log         — historial de builds del índice FAISS
   • embedding_meta    — metadatos del módulo de embedding
@@ -265,7 +265,7 @@ def main() -> None:
 
     print(f"  {CYAN}Próximos pasos sugeridos:{RESET}")
     print(f"  {DIM}1. Reconstruir chunks:  python -m backend.tools.rebuild_chunks{RESET}")
-    print(f"  {DIM}2. Crear índice BM25:   python -m backend.tools.build_index{RESET}")
+    print(f"  {DIM}2. Crear índice TF-IDF:   python -m backend.tools.build_index{RESET}")
     print(f"  {DIM}3. Crear embeddings:    python -m backend.tools.embed_chunks{RESET}\n")
 
 

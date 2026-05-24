@@ -34,17 +34,9 @@ from datetime import datetime
 from pathlib import Path
 
 # -- Resolver ruta al paquete backend -----------------------------------------
-def _find_backend_root() -> Path | None:
-    p = Path(__file__).resolve().parent
-    for _ in range(6):
-        if (p / "backend" / "backend" / "__init__.py").exists():
-            return p / "backend"
-        p = p.parent
-    return None
-
-_backend = _find_backend_root()
-if _backend and str(_backend) not in sys.path:
-    sys.path.insert(0, str(_backend))
+ROOT = Path(__file__).resolve().parent.parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 # -----------------------------------------------------------------------------
 
 from backend.database.schema import DB_PATH, get_connection
