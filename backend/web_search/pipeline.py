@@ -66,7 +66,6 @@ class WebSearchPipeline:
     max_results   : máximo de resultados a pedir a Tavily (default: 5)
     search_depth  : "basic" | "advanced" (default: "basic")
     use_fallback  : usar DuckDuckGo si Tavily falla (default: True)
-    auto_index    : indexar automáticamente los docs web guardados (default: True)
     db_path       : ruta a la BD SQLite
     """
 
@@ -77,21 +76,23 @@ class WebSearchPipeline:
         min_docs: int = 1,
         max_results: int = 5,
         search_depth: str = "basic",
-        use_fallback: bool = True,
-        auto_index: bool = True,
-        db_path: Path = DB_PATH,
+        use_fallback:  bool            = True,
+        seed_domains:  list[str] | None = None,
+        fetch_content: bool            = True,
+        db_path:       Path            = DB_PATH,
     ) -> None:
         self.searcher   = WebSearcher(
-            api_key=api_key,
-            max_results=max_results,
-            search_depth=search_depth,
-            use_fallback=use_fallback,
+            api_key       = api_key,
+            max_results   = max_results,
+            search_depth  = search_depth,
+            use_fallback  = use_fallback,
+            seed_domains  = seed_domains,
+            fetch_content = fetch_content,
         )
         self.checker    = SufficiencyChecker(
             threshold=threshold,
             min_docs=min_docs,
         )
-        self.auto_index = auto_index
         self.db_path    = db_path
 
     def run(
@@ -115,7 +116,6 @@ class WebSearchPipeline:
             "web_results"    : resultados web normalizados
             "reason"         : explicación de la decisión de suficiencia
             "query"          : query original
-            "indexed"        : número de docs web indexados (0 si auto_index=False)
         """
         reason = self.checker.get_reason(retriever_results)
 
@@ -127,8 +127,7 @@ class WebSearchPipeline:
                 "web_results":   [],
                 "reason":        reason,
                 "query":         query,
-                "indexed":       0,
-            }
+                }
 
         # Información insuficiente → activar búsqueda web
         log.info("[WebSearch] Activando búsqueda web para: '%s'", query)
@@ -146,9 +145,7 @@ class WebSearchPipeline:
             )
             log.info("[WebSearch] %d documentos web guardados en BD.", saved)
 
-            # Indexar automáticamente si hay docs nuevos
-            if self.auto_index and saved > 0:
-                indexed = self._index_web_results()
+
 
         # Normalizar al formato del retriever
         web_normalized = [
@@ -157,16 +154,17 @@ class WebSearchPipeline:
                 "arxiv_id": "",
                 "title":    r["title"],
                 "authors":  "Web Search",
-                "abstract": r["content"][:300],
+                "abstract": r["content"],   # contenido completo para RAG
                 "url":      r["url"],
                 "source":   r.get("source", "web"),
             }
             for r in web_results
         ]
 
-        # Marcar fuente en resultados locales
+        # Marcar fuente en resultados locales (solo si son dicts)
         for r in retriever_results:
-            r.setdefault("source", "local")
+            if isinstance(r, dict):
+                r.setdefault("source", "local")
 
         # Combinar: primero locales, luego web
         combined = retriever_results + web_normalized
@@ -183,31 +181,7 @@ class WebSearchPipeline:
             "web_results":   web_normalized,
             "reason":        reason,
             "query":         query,
-            "indexed":       indexed,
         }
-
-    def _index_web_results(self) -> int:
-        """
-        Indexa los documentos web recién guardados en la BD.
-
-        Llama al IndexingPipeline del módulo de indexación para procesar
-        solo los documentos nuevos (indexación incremental).
-
-        Devuelve el número de documentos indexados, 0 si falla.
-        """
-        try:
-            from backend.indexing.pipeline import IndexingPipeline
-            log.info("[WebSearch] Indexando documentos web nuevos…")
-            pipeline = IndexingPipeline(db_path=self.db_path, field="both")
-            stats    = pipeline.run(reindex=False)
-            indexed  = stats.get("docs_processed", 0)
-            log.info("[WebSearch] %d documentos web indexados.", indexed)
-            return indexed
-        except Exception as exc:
-            log.warning(
-                "[WebSearch] No se pudieron indexar los docs web: %s", exc
-            )
-            return 0
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -281,7 +255,6 @@ def main() -> None:
     print(f"Web activada  : {output['web_activated']}")
     print(f"Razón         : {output['reason']}")
     print(f"Total results : {len(output['results'])}")
-    print(f"Docs indexados: {output['indexed']}")
     print(f"{'='*60}")
     for i, r in enumerate(output["results"], 1):
         print(f"\n[{i}] {r['title']}")
