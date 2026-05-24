@@ -65,14 +65,15 @@ class ContextBuilder:
         for i, r in enumerate(results[:max_sources], start=1):
             out.append(
                 {
-                    "citation": i,
-                    "chunk_id": r.chunk_id,
-                    "arxiv_id": r.arxiv_id,
+                    "citation":    i,
+                    "chunk_id":    r.chunk_id,
+                    "arxiv_id":    r.arxiv_id,
                     "chunk_index": r.chunk_index,
-                    "title": self._get_title(r),
-                    "year": self._get_year(r),
-                    "score": r.score,
-                    "score_type": r.score_type,
+                    "title":       self._get_title(r),
+                    "year":        self._get_year(r),
+                    "url":         self._get_url(r),
+                    "score":       r.score,
+                    "score_type":  r.score_type,
                 }
             )
         return out
@@ -83,6 +84,12 @@ class ContextBuilder:
         return (
             str(meta.get("title") or meta.get("document_title") or meta.get("paper_title") or result.arxiv_id)
         )
+
+    @staticmethod
+    def _get_url(result: RetrievalResult) -> str:
+        """Extrae la URL del PDF desde los metadatos del resultado."""
+        meta = result.metadata or {}
+        return str(meta.get("pdf_url") or meta.get("url") or "")
 
     @staticmethod
     def _get_year(result: RetrievalResult) -> str:
