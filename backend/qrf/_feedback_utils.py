@@ -28,22 +28,12 @@ def get_embeddings_by_chunk_ids(
     en lugar de reconstruirse desde FAISS, evitando el error de aproximación
     de la cuantización PQ de IndexIVFPQ.
     """
-    from backend.database.schema import get_connection
+    from backend.database.chunk_repository import get_chunk_embeddings_by_ids
 
     if not chunk_ids:
         return {}
 
-    ph   = ",".join("?" * len(chunk_ids))
-    conn = get_connection(db_path)
-    try:
-        rows = conn.execute(
-            f"SELECT id, embedding FROM chunks "
-            f"WHERE id IN ({ph}) AND embedding IS NOT NULL",
-            chunk_ids,
-        ).fetchall()
-    finally:
-        conn.close()
-
+    rows = get_chunk_embeddings_by_ids(chunk_ids, db_path=db_path)
     return {
         row["id"]: np.frombuffer(row["embedding"], dtype=np.float32)
         for row in rows

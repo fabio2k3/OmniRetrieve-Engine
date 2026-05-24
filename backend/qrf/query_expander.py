@@ -104,27 +104,12 @@ class QueryExpander:
           word_index   : word -> (row_idx_en_SVD, df)
           idx_to_word  : row_idx_en_SVD -> word
         """
-        from backend.database.schema import get_connection
+        from backend.database.index_repository import get_term_words_by_ids
 
         if not self._model or not self._model.term_ids:
             return {}, {}
 
-        _CHUNK_SIZE = 900
-        term_ids    = self._model.term_ids
-        rows        = []
-        conn        = get_connection(db_path)
-        try:
-            for offset in range(0, len(term_ids), _CHUNK_SIZE):
-                chunk = term_ids[offset: offset + _CHUNK_SIZE]
-                ph    = ",".join("?" * len(chunk))
-                rows.extend(
-                    conn.execute(
-                        f"SELECT term_id, word FROM terms WHERE term_id IN ({ph})",
-                        chunk,
-                    ).fetchall()
-                )
-        finally:
-            conn.close()
+        rows = get_term_words_by_ids(self._model.term_ids, db_path=db_path)
 
         term_id_to_row = {tid: i for i, tid in enumerate(self._model.term_ids)}
         word_index:   dict[str, tuple[int, int]] = {}
