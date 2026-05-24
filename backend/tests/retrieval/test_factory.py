@@ -8,10 +8,6 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 
-# ---------------------------------------------------------------------------
-# Tests — build_faiss_manager
-# ---------------------------------------------------------------------------
-
 class TestBuildFaissManager:
     def test_raises_if_index_not_found(self):
         from backend.retrieval import factory
@@ -25,7 +21,7 @@ class TestBuildFaissManager:
         with patch.object(factory, "FaissIndexManager", return_value=mock_mgr), \
              patch.dict(sys.modules, {"sentence_transformers": mock_st_module}):
             with pytest.raises(RuntimeError, match="FAISS"):
-                factory.build_faiss_manager()
+                factory.build_faiss_manager(embed_model="mock-model")
 
     def test_returns_manager_when_loaded(self):
         from backend.retrieval import factory
@@ -39,14 +35,10 @@ class TestBuildFaissManager:
 
         with patch.object(factory, "FaissIndexManager", return_value=mock_mgr), \
              patch.dict(sys.modules, {"sentence_transformers": mock_st_module}):
-            mgr = factory.build_faiss_manager()
+            mgr = factory.build_faiss_manager(embed_model="mock-model")
 
         assert mgr is mock_mgr
 
-
-# ---------------------------------------------------------------------------
-# Tests — build_lsi_retriever
-# ---------------------------------------------------------------------------
 
 class TestBuildLsiRetriever:
     def test_raises_if_model_not_found(self, tmp_path):
@@ -61,7 +53,6 @@ class TestBuildLsiRetriever:
 
         model_path = tmp_path / "lsi_model.pkl"
         model_path.touch()
-
         mock_retriever = MagicMock()
 
         with patch.object(factory, "MODEL_PATH", model_path), \
@@ -71,39 +62,31 @@ class TestBuildLsiRetriever:
         mock_retriever.load.assert_called_once()
 
 
-# ---------------------------------------------------------------------------
-# Tests — build_embedding_retriever
-# ---------------------------------------------------------------------------
-
 class TestBuildEmbeddingRetriever:
     def test_reuses_provided_faiss_manager(self):
         from backend.retrieval import factory
 
         mock_faiss = MagicMock()
-        mock_er    = MagicMock()
+        mock_er = MagicMock()
 
         with patch.object(factory, "EmbeddingRetriever", return_value=mock_er) as MockER:
-            result = factory.build_embedding_retriever(faiss_mgr=mock_faiss)
+            result = factory.build_embedding_retriever(embed_model="mock-model", faiss_mgr=mock_faiss)
 
-        MockER.assert_called_once_with(faiss_mgr=mock_faiss)
+        MockER.assert_called_once_with(faiss_mgr=mock_faiss, model_name="mock-model")
         assert result is mock_er
 
     def test_builds_faiss_if_none_provided(self):
         from backend.retrieval import factory
 
         mock_faiss = MagicMock()
-        mock_er    = MagicMock()
+        mock_er = MagicMock()
 
         with patch.object(factory, "build_faiss_manager", return_value=mock_faiss), \
              patch.object(factory, "EmbeddingRetriever", return_value=mock_er):
-            result = factory.build_embedding_retriever(faiss_mgr=None)
+            result = factory.build_embedding_retriever(embed_model="mock-model", faiss_mgr=None)
 
         assert result is mock_er
 
-
-# ---------------------------------------------------------------------------
-# Tests — build_hybrid_retriever
-# ---------------------------------------------------------------------------
 
 class TestBuildHybridRetriever:
     def _patches(self):
@@ -120,14 +103,14 @@ class TestBuildHybridRetriever:
         from backend.retrieval import factory
         p = self._patches()
         with p[0], p[1], p[2], p[3] as MockHybrid, p[4]:
-            result = factory.build_hybrid_retriever()
+            result = factory.build_hybrid_retriever(embed_model="mock-model")
         assert result is MockHybrid.return_value
 
     def test_reranker_passed_when_enabled(self):
         from backend.retrieval import factory
         p = self._patches()
         with p[0], p[1], p[2], p[3] as MockHybrid, p[4] as MockRerank:
-            factory.build_hybrid_retriever(with_reranker=True)
+            factory.build_hybrid_retriever(embed_model="mock-model", with_reranker=True)
         _, kwargs = MockHybrid.call_args
         assert kwargs.get("reranker") is MockRerank.return_value
 
@@ -135,7 +118,7 @@ class TestBuildHybridRetriever:
         from backend.retrieval import factory
         p = self._patches()
         with p[0], p[1], p[2], p[3] as MockHybrid, p[4]:
-            factory.build_hybrid_retriever(with_reranker=False)
+            factory.build_hybrid_retriever(embed_model="mock-model", with_reranker=False)
         _, kwargs = MockHybrid.call_args
         assert kwargs.get("reranker") is None
 
@@ -143,7 +126,7 @@ class TestBuildHybridRetriever:
         from backend.retrieval import factory
         p = self._patches()
         with p[0], p[1], p[2], p[3] as MockHybrid, p[4]:
-            factory.build_hybrid_retriever(rrf_k=30)
+            factory.build_hybrid_retriever(embed_model="mock-model", rrf_k=30)
         _, kwargs = MockHybrid.call_args
         assert kwargs.get("rrf_k") == 30
 
@@ -151,7 +134,7 @@ class TestBuildHybridRetriever:
         from backend.retrieval import factory
         p = self._patches()
         with p[0] as mock_build_faiss, p[1], p[2] as mock_build_dense, p[3], p[4]:
-            factory.build_hybrid_retriever()
+            factory.build_hybrid_retriever(embed_model="mock-model")
         mock_build_faiss.assert_called_once()
         _, kwargs = mock_build_dense.call_args
         assert "faiss_mgr" in kwargs
