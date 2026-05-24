@@ -1,22 +1,18 @@
 """
 faiss/constants.py
 ==================
-Constantes del subpaquete FAISS.
+Constantes internas del subpaquete FAISS.
 
-Centraliza todos los valores por defecto del índice para que ningún otro
-módulo los duplique o hardcodee.
+Solo contiene valores que son verdaderamente fijos e internos al algoritmo
+FAISS (heurísticas de entrenamiento).
+
+Los parámetros configurables por el usuario (nlist, m, nbits, nprobe,
+rebuild_every) se han centralizado en OrchestratorConfig como embed_nlist,
+embed_m, embed_nbits, embed_nprobe y embed_rebuild_every.
+FaissIndexManager los recibe como parámetros del constructor desde _faiss.py.
 """
 
 # Número mínimo de vectores por celda de Voronoi que FAISS necesita para
 # entrenar de forma estable (heurística interna de K-means).
-# El umbral real es: nlist * _MIN_TRAIN_FACTOR
+# El umbral real es: nlist * MIN_TRAIN_FACTOR
 MIN_TRAIN_FACTOR = 39
-
-# Parámetros por defecto del índice IndexIVFPQ
-DEFAULT_NLIST  = 100   # celdas de Voronoi
-DEFAULT_M      = 8     # subvectores PQ  (384 / 8 = 48 → válido para dim=384)
-DEFAULT_NBITS  = 8     # bits por código (256 centroides/subvector)
-DEFAULT_NPROBE = 10    # celdas inspeccionadas en cada búsqueda
-
-# Cada cuántos chunks añadidos se dispara una reconstrucción completa
-DEFAULT_REBUILD_EVERY = 10_000
