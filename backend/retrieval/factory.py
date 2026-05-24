@@ -13,10 +13,10 @@ de módulo para que patch() en tests pueda interceptarlas correctamente.
 
 API pública
 -----------
-build_faiss_manager()       → FaissIndexManager cargado desde disco.
-build_lsi_retriever()       → LSIRetriever cargado e inicializado.
-build_embedding_retriever() → EmbeddingRetriever con FAISS real.
-build_hybrid_retriever()    → HybridRetriever (LSI + FAISS [+ reranker]).
+build_faiss_manager(embed_model)    → FaissIndexManager cargado desde disco.
+build_lsi_retriever()               → LSIRetriever cargado e inicializado.
+build_embedding_retriever()         → EmbeddingRetriever con FAISS real.
+build_hybrid_retriever()            → HybridRetriever (LSI + FAISS [+ reranker]).
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ import logging
 from pathlib import Path
 
 from backend.embedding.faiss.index_manager import FaissIndexManager
-from backend.embedding.embedder import DEFAULT_MODEL
 from backend.retrieval.lsi_model import MODEL_PATH
 from backend.retrieval.lsi_retriever import LSIRetriever
 from backend.retrieval.embedding_retriever import EmbeddingRetriever
@@ -35,21 +34,26 @@ from backend.retrieval.reranker import CrossEncoderReranker
 log = logging.getLogger(__name__)
 
 
-def build_faiss_manager() -> FaissIndexManager:
+def build_faiss_manager(embed_model: str) -> FaissIndexManager:
     """
     Construye y carga un FaissIndexManager con las rutas por defecto.
+
+    Parámetros
+    ----------
+    embed_model : nombre del modelo sentence-transformers activo.
+                  Debe coincidir con cfg.embed_model para que la dimensión
+                  del índice FAISS sea correcta.
 
     Lanza RuntimeError si los ficheros de índice no existen en disco.
     """
     from sentence_transformers import SentenceTransformer
     from backend.embedding.pipeline import _INDEX_PATH, _ID_MAP_PATH
 
-    dim = SentenceTransformer(DEFAULT_MODEL).get_sentence_embedding_dimension()
+    dim = SentenceTransformer(embed_model).get_sentence_embedding_dimension()
     mgr = FaissIndexManager(dim=dim, index_path=_INDEX_PATH, id_map_path=_ID_MAP_PATH)
     loaded = mgr.load()
 
     if not loaded:
-        from backend.embedding.pipeline import _INDEX_PATH, _ID_MAP_PATH
         raise RuntimeError(
             f"No se encontró el índice FAISS en disco.\n"
             f"  index  : {_INDEX_PATH}\n"
@@ -79,28 +83,34 @@ def build_lsi_retriever(doc_candidates: int = 20) -> LSIRetriever:
     return r
 
 
-def build_embedding_retriever(faiss_mgr: FaissIndexManager | None = None) -> EmbeddingRetriever:
+def build_embedding_retriever(
+    embed_model: str,
+    faiss_mgr: FaissIndexManager | None = None,
+) -> EmbeddingRetriever:
     """
     Construye un EmbeddingRetriever.
 
     Parámetros
     ----------
-    faiss_mgr : FaissIndexManager ya construido (se reutiliza si se comparte).
-                Si None, se construye uno nuevo.
+    embed_model : nombre del modelo sentence-transformers activo.
+    faiss_mgr   : FaissIndexManager ya construido (se reutiliza si se comparte).
+                  Si None, se construye uno nuevo.
     """
     if faiss_mgr is None:
-        faiss_mgr = build_faiss_manager()
+        faiss_mgr = build_faiss_manager(embed_model=embed_model)
 
-    r = EmbeddingRetriever(faiss_mgr=faiss_mgr)
+    r = EmbeddingRetriever(faiss_mgr=faiss_mgr, model_name=embed_model)
     log.info("[factory] EmbeddingRetriever listo")
     return r
 
 
 def build_hybrid_retriever(
+    embed_model:    str,
     with_reranker:  bool = True,
-    candidate_k:   int  = 50,
-    rrf_k:         int  = 60,
+    candidate_k:    int  = 50,
+    rrf_k:          int  = 60,
     doc_candidates: int  = 20,
+    reranker_model: str  = "cross-encoder/ms-marco-MiniLM-L-6-v2",
 ) -> HybridRetriever:
     """
     Construye el HybridRetriever completo (LSI + FAISS + reranker opcional).
@@ -109,15 +119,18 @@ def build_hybrid_retriever(
 
     Parámetros
     ----------
+    embed_model    : nombre del modelo sentence-transformers activo.
+                     Debe coincidir con cfg.embed_model.
     with_reranker  : si True, añade CrossEncoderReranker como segunda etapa.
     candidate_k    : candidatos por rama antes del RRF.
     rrf_k          : constante de suavizado RRF.
     doc_candidates : documentos LSI a expandir a chunks por query.
+    reranker_model : modelo cross-encoder para el reranker.
     """
-    faiss_mgr = build_faiss_manager()
+    faiss_mgr = build_faiss_manager(embed_model=embed_model)
     lsi       = build_lsi_retriever(doc_candidates=doc_candidates)
-    dense     = build_embedding_retriever(faiss_mgr=faiss_mgr)
-    reranker  = CrossEncoderReranker() if with_reranker else None
+    dense     = build_embedding_retriever(embed_model=embed_model, faiss_mgr=faiss_mgr)
+    reranker  = CrossEncoderReranker(model_name=reranker_model) if with_reranker else None
 
     retriever = HybridRetriever(
         sparse=lsi,
@@ -129,7 +142,7 @@ def build_hybrid_retriever(
     )
 
     log.info(
-        "[factory] HybridRetriever listo (candidate_k=%d rrf_k=%d reranker=%s)",
-        candidate_k, rrf_k, "sí" if with_reranker else "no",
+        "[factory] HybridRetriever listo (embed_model=%s candidate_k=%d rrf_k=%d reranker=%s)",
+        embed_model, candidate_k, rrf_k, "sí" if with_reranker else "no",
     )
     return retriever

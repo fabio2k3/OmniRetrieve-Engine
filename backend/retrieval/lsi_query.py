@@ -26,15 +26,12 @@ from pathlib import Path
 
 import numpy as np
 
-from backend.database.schema import DB_PATH, get_connection
+from backend.database.schema import DB_PATH
+from backend.database.index_repository import get_term_words_by_ids
 from backend.indexing.preprocessor import TextPreprocessor
 from .lsi_model import LSIModel
 
 log = logging.getLogger(__name__)
-
-# SQLite tiene límite de 999 variables por consulta
-_SQLITE_CHUNK = 900
-
 
 def build_word_index(
     model: LSIModel,
@@ -59,23 +56,9 @@ def build_word_index(
     if not model.term_ids:
         return {}
 
-    term_ids = model.term_ids
-    rows: list = []
-    conn = get_connection(db_path)
-    try:
-        for offset in range(0, len(term_ids), _SQLITE_CHUNK):
-            chunk = term_ids[offset : offset + _SQLITE_CHUNK]
-            placeholders = ",".join("?" * len(chunk))
-            rows.extend(
-                conn.execute(
-                    f"SELECT term_id, word FROM terms WHERE term_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-            )
-    finally:
-        conn.close()
+    rows = get_term_words_by_ids(model.term_ids, db_path=db_path)
 
-    term_id_to_row = {tid: i for i, tid in enumerate(term_ids)}
+    term_id_to_row = {tid: i for i, tid in enumerate(model.term_ids)}
     index: dict[str, tuple[int, int]] = {}
     for r in rows:
         tid     = r["term_id"]

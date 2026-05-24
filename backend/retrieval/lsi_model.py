@@ -19,6 +19,13 @@ Fórmulas aplicadas
     IDF(t)    = log((N + 1) / (df(t) + 1))   suavizado Laplace
     W(t, d)   = TF(t, d) × IDF(t)
 
+Filtrado de vocabulario
+------------------
+    min_df        : término debe aparecer en al menos min_df documentos.
+                    Elimina hapax legomena y términos muy raros (ruido SVD).
+    max_df_ratio  : término no debe superar esta fracción del corpus.
+                    Elimina stop-words de dominio no capturadas por IDF.
+
 Referencia: Manning et al. (2008), Cap. 18, sec. 18.1–18.4
 """
 
@@ -73,14 +80,21 @@ class LSIModel:
     # Fase offline
     # ------------------------------------------------------------------
 
-    def build(self, db_path: Path = DB_PATH, max_docs: int | None = None) -> dict:
+    def build(
+        self,
+        db_path:       Path          = DB_PATH,
+        max_docs:      int | None   = None,
+        min_df:        int          = 20,
+        max_df_ratio:  float        = 0.85,
+    ) -> dict:
         """
         Construye el espacio latente LSI desde el índice invertido.
 
         Flujo
         -----
         1. Lee postings (freq), df_map, doc_ids, term_ids desde index_repository.
-        2. Construye la matriz TF-IDF sparse (n_terms × n_docs).
+        2. Filtra el vocabulario por rango de df (min_df … max_df_ratio × N).
+        3. Construye la matriz TF-IDF sparse (n_terms_filtrados × n_docs).
         3. Aplica TruncatedSVD sobre la transpuesta → (n_docs × k).
         4. Normaliza L2 para que similitud coseno = producto punto.
         5. Registra la sesión en lsi_log.
@@ -106,7 +120,29 @@ class LSIModel:
             len(doc_ids), len(term_ids), len(postings),
         )
 
-        # ── Construir matriz TF-IDF sparse (n_terms × n_docs) ────────────
+        # ── Filtrar vocabulario por rango de df ───────────────────────────
+        # Elimina hapax legomena (min_df) y stop-words de dominio (max_df_ratio).
+        # Con 6K+ docs y vocabulario sin filtrar, el 94%+ de los términos
+        # aparecen en <20 docs y son ruido puro para el SVD.
+        n_docs_total_float = float(n_docs_total)
+        max_df_abs = int(max_df_ratio * n_docs_total_float)
+        term_ids = [
+            t for t in term_ids
+            if min_df <= df_map.get(t, 0) <= max_df_abs
+        ]
+        log.info(
+            "[LSIModel] Vocabulario filtrado: %d términos "
+            "(min_df=%d, max_df=%d → %.1f%% del corpus)",
+            len(term_ids), min_df, max_df_abs, max_df_ratio * 100,
+        )
+
+        if not term_ids:
+            raise RuntimeError(
+                f"Vocabulario vacío tras filtrado (min_df={min_df}, "
+                f"max_df_ratio={max_df_ratio}). Reduce min_df."
+            )
+
+        # ── Construir matriz TF-IDF sparse (n_terms_filtrados × n_docs) ──
         doc_idx  = {d: i for i, d in enumerate(doc_ids)}
         term_idx = {t: i for i, t in enumerate(term_ids)}
         N        = n_docs_total
@@ -145,6 +181,8 @@ class LSIModel:
             "k":             self.k,
             "var_explained": var,
             "elapsed_s":     round(elapsed, 2),
+            "min_df":        min_df,
+            "max_df_ratio":  max_df_ratio,
         }
         self._log_to_db(stats, db_path)
         return stats
