@@ -16,7 +16,7 @@ import logging
 import threading
 from typing import Callable
 
-from backend.database.chunk_repository import get_chunk_stats
+from backend.database import get_chunk_stats
 from ..config import OrchestratorConfig
 
 log = logging.getLogger(__name__)

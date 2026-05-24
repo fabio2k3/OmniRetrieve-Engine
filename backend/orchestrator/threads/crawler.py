@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from backend.crawler.crawler import Crawler, CrawlerConfig
+from backend.crawler import Crawler, CrawlerConfig
 from ..config import OrchestratorConfig
 
 log = logging.getLogger(__name__)

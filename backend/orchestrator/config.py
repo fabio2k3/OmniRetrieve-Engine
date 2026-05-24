@@ -47,6 +47,10 @@ class OrchestratorConfig:
     lsi_min_docs         : mínimo de documentos indexados para construir el modelo.
     lsi_doc_candidates   : documentos LSI (por similitud coseno) a expandir a chunks
                            reales antes de devolver resultados al HybridRetriever.
+    lsi_min_df           : término debe aparecer en al menos este número de documentos
+                           para incluirse en la matriz TF-IDF del SVD. Elimina ruido.
+    lsi_max_df_ratio     : término no puede superar esta fracción del corpus. Elimina
+                           stop-words de dominio no capturadas por IDF.
 
     Embedding / FAISS
     -----------------
@@ -135,7 +139,9 @@ class OrchestratorConfig:
     lsi_rebuild_interval: float = 3600.0
     lsi_k:                int   = 100
     lsi_min_docs:         int   = 10
-    lsi_doc_candidates:   int   = 20    # docs LSI a expandir a chunks por query
+    lsi_doc_candidates:   int   = 20
+    lsi_min_df:           int   = 20    # términos con df < min_df se excluyen del SVD
+    lsi_max_df_ratio:     float = 0.85  # términos en >85% de docs se excluyen del SVD    # docs LSI a expandir a chunks por query
 
     # ── embedding / FAISS ────────────────────────────────────────────────────
     embed_model:         str   = "all-MiniLM-L6-v2"

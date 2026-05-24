@@ -1,7 +1,7 @@
 """
 threads/indexing.py
 ===================
-Hilo watcher de indexación BM25 incremental.
+Hilo watcher de indexación TF incremental.
 
 Responsabilidad única: sondear la BD cada ``index_poll_interval`` segundos
 y disparar ``do_index()`` cuando hay suficientes PDFs sin indexar
@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from backend.database.schema import get_connection
+from backend.database import get_unindexed_pdf_count
 
 from ..config import OrchestratorConfig
 from .._operations import do_index
@@ -29,7 +29,7 @@ def run_indexing_thread(
     shutdown: threading.Event,
 ) -> None:
     """
-    Watcher de indexación BM25 incremental.
+    Watcher de indexación TF incremental.
 
     Sondea la BD periódicamente. Cuando hay al menos ``cfg.pdf_threshold``
     documentos con PDF descargado pero sin indexar, lanza ``do_index()``.
@@ -66,16 +66,9 @@ def run_indexing_thread(
 
 
 def _count_pending(cfg: OrchestratorConfig) -> int:
-    """Cuenta docs con PDF descargado pero aún sin indexar en BM25."""
+    """Cuenta docs con PDF descargado pero aún sin indexar en el índice invertido TF."""
     try:
-        conn = get_connection(cfg.db_path)
-        try:
-            return conn.execute(
-                "SELECT COUNT(*) FROM documents "
-                "WHERE pdf_downloaded = 1 AND indexed_tfidf_at IS NULL"
-            ).fetchone()[0]
-        finally:
-            conn.close()
+        return get_unindexed_pdf_count(cfg.db_path)
     except Exception as exc:
         log.warning("[indexing] No se pudo consultar pendientes: %s", exc)
         return 0

@@ -27,7 +27,7 @@ import logging
 import threading
 from typing import Optional, TYPE_CHECKING
 
-from backend.database.schema import get_connection
+from backend.database.index_repository import get_indexed_doc_count
 from backend.indexing.pipeline import IndexingPipeline
 from backend.embedding.pipeline import EmbeddingPipeline
 from backend.embedding import FaissIndexManager
@@ -91,11 +91,7 @@ def do_lsi_rebuild(
     Returns ``dict`` con stats o ``None`` si no hay suficientes docs o falla.
     """
     try:
-        conn = get_connection(cfg.db_path)
-        n_indexed = conn.execute(
-            "SELECT COUNT(DISTINCT doc_id) FROM postings"
-        ).fetchone()[0]
-        conn.close()
+        n_indexed = get_indexed_doc_count(cfg.db_path)
     except Exception as exc:
         log.warning("[lsi] No se pudo consultar la BD: %s", exc)
         return None
@@ -201,15 +197,23 @@ def do_web_search(
             "query": query, "indexed": 0,
         }
 
-    pipeline = WebSearchPipeline(
-        threshold    = cfg.web_threshold,
-        min_docs     = cfg.web_min_docs,
-        max_results  = cfg.web_max_results,
-        search_depth = cfg.web_search_depth,
-        use_fallback = cfg.web_use_fallback,
-        auto_index   = cfg.web_auto_index,
-        db_path      = cfg.db_path,
-    )
+    try:
+        pipeline = WebSearchPipeline(
+            threshold    = cfg.web_threshold,
+            min_docs     = cfg.web_min_docs,
+            max_results  = cfg.web_max_results,
+            search_depth = cfg.web_search_depth,
+            use_fallback = cfg.web_use_fallback,
+            auto_index   = cfg.web_auto_index,
+            db_path      = cfg.db_path,
+        )
+    except Exception as exc:
+        log.error("[web_search] Error al inicializar WebSearchPipeline: %s", exc)
+        return {
+            "results": retriever_results, "web_activated": False,
+            "web_results": [], "reason": f"Pipeline error: {exc}",
+            "query": query, "indexed": 0,
+        }
     return pipeline.run(query=query, retriever_results=retriever_results)
 
 

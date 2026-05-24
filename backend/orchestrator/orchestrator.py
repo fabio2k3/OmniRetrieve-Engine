@@ -15,7 +15,7 @@ Toda la lógica de negocio está delegada en módulos internos:
 Hilos daemon
 ------------
 crawler      — descubrimiento y descarga de artículos arXiv.
-indexing     — indexación BM25 incremental (terms + postings) cuando hay PDFs nuevos.
+indexing     — indexación incremental con índice invertido TF (terms + postings).
 lsi_rebuild  — reconstrucción periódica del modelo LSI.
 embedding    — embedding incremental de chunks y actualización de FAISS.
 qrf_rag      — carga de QueryPipeline, HybridRetriever, CrossEncoder y RAGPipeline.
@@ -28,19 +28,24 @@ query_with_web()— búsqueda LSI + fallback web.
 qrf_search()    — búsqueda QRF standalone (sin hybrid ni reranking).
 rag_search()    — retrieval denso sin LLM.
 rag_ask()       — pipeline RAG standalone.
-status()        — snapshot del estado del sistema.
+status()        — snapshot del estado del sistema (incluye uptime y hilos).
+
+---------------------------------------
+- ``self._start_time``: registra time.time() en __init__ para calcular uptime.
+- ``status()`` pasa ``start_time`` y ``thread_alive`` a ``build_status()``.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Optional
 
-from backend.database.schema import init_db
-from backend.database.embedding_repository import init_embedding_schema
+from backend.database import init_db
+from backend.database import init_embedding_schema
 from backend.embedding import FaissIndexManager
-from backend.retrieval.lsi_retriever import LSIRetriever
+from backend.retrieval import LSIRetriever
 
 from .config      import OrchestratorConfig
 from ._faiss      import init_faiss_mgr
@@ -70,12 +75,14 @@ class Orchestrator:
     ---
         orc = Orchestrator()
         orc.start()
-        # La interfaz de usuario (Streamlit) llama a los métodos de la API pública.
         orc.stop()
     """
 
     def __init__(self, config: Optional[OrchestratorConfig] = None) -> None:
         self.cfg = config or OrchestratorConfig()
+
+        # ── Timestamp de inicio (para calcular uptime) ────────────────────────
+        self._start_time: float = time.time()
 
         # ── Señales de coordinación ──────────────────────────────────────────
         self._shutdown = threading.Event()
@@ -132,7 +139,7 @@ class Orchestrator:
         # 2. embedding   — procesa chunks pendientes → faiss_ready
         # 3. qrf_rag     — espera lsi+faiss y construye el pipeline completo
         # 4. crawler     — descarga de documentos (red, no bloquea búsqueda)
-        # 5. indexing    — indexación BM25 (disco, no bloquea búsqueda)
+        # 5. indexing    — indexación TF (disco, no bloquea búsqueda)        
         specs = [
             ("lsi_rebuild", self._target_lsi_rebuild),
             ("embedding",   self._target_embedding),
@@ -157,8 +164,6 @@ class Orchestrator:
         """
         Pipeline unificado: QRF expand → HybridRetriever → WebSearch
         → CrossEncoder → RAG → respuesta LLM.
-
-        Es el método principal de consulta del sistema.
 
         Returns
         -------
@@ -305,7 +310,13 @@ class Orchestrator:
         )
 
     def status(self) -> dict:
-        """Devuelve un snapshot del estado actual del sistema."""
+        """
+        Devuelve un snapshot del estado actual del sistema.
+
+        Incluye uptime (segundos desde __init__) y el estado is_alive()
+        de cada hilo daemon.
+        """
+        thread_alive = {t.name: t.is_alive() for t in self._threads}
         return build_status(
             cfg              = self.cfg,
             lsi_lock         = self._lsi_lock,
@@ -317,6 +328,8 @@ class Orchestrator:
             qrf_ready        = self._qrf_ready,
             rag_ready        = self._rag_ready,
             pipeline_ready   = self._pipeline_ready,
+            start_time       = self._start_time,
+            thread_alive     = thread_alive,
         )
 
     # ── Targets de hilos ──────────────────────────────────────────────────────
