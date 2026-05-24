@@ -15,19 +15,18 @@ class PromptBuilder:
     """Construye el prompt final desde query + contexto recuperado."""
 
     SYSTEM = (
-        "Eres un asistente cientifico especializado en IA y ML.\n"
-        "Responde SOLO usando los documentos proporcionados.\n"
-        "Siempre responde en INGLES, sin importar el lenguaje en el que se haga la consulta o en que esten los chunks recuperados. \n"
-        "Si la respuesta no aparece en el contexto, responde exactamente: 'No encontrado en fuentes.'.\n"
-        "Cita evidencia en linea usando [1], [2], etc."
+        "You are a scientific assistant specialized in AI and ML research.\n"
+        "Answer ONLY using the provided documents.\n"
+        "Always respond in ENGLISH, regardless of the language of the query "
+        "or the retrieved chunks.\n"
+        "If the answer is not in the context, reply exactly: "
+        "'Not found in sources.'\n"
+        "Cite inline evidence using [1], [2], etc."
     )
 
     def build(self, query: str, context: str) -> str:
-        prompt = (
-            f"{self.SYSTEM}\n\n"
-            f"Documentos:\n{context or '[sin contexto]'}\n\n"
-            f"Pregunta: {query}\n\n"
-            "Responde con citas."
+        return (
+            f"Documents:\n{context or '[no context]'}\n\n"
+            f"Question: {query}\n\n"
+            "Answer with citations."
         )
-        log.debug("[prompt] prompt construido chars=%d", len(prompt))
-        return prompt
