@@ -70,8 +70,8 @@ def _parse_args() -> argparse.Namespace:
     g.add_argument("--download-interval",  type=float, default=_D.download_interval)
     g.add_argument("--pdf-interval",       type=float, default=_D.pdf_interval)
 
-    # Indexing BM25
-    g = p.add_argument_group("indexing BM25")
+    # Indexing TF-IDF
+    g = p.add_argument_group("indexing TF-IDF")
     g.add_argument("--pdf-threshold",    type=int,   default=_D.pdf_threshold)
     g.add_argument("--index-poll",       type=float, default=_D.index_poll_interval)
     g.add_argument("--index-field",      type=str,   default=_D.index_field,

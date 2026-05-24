@@ -256,7 +256,7 @@ def get_document_counts(db_path: Path = DB_PATH) -> dict[str, int]:
 def get_unindexed_pdf_count(db_path: Path = DB_PATH) -> int:
     """
     Devuelve el número de documentos con PDF descargado pero aún sin
-    indexar en BM25 (indexed_tfidf_at IS NULL).
+    indexar en TF-IDF (indexed_tfidf_at IS NULL).
 
     Usado por el hilo de indexación para decidir si hay trabajo pendiente.
     """

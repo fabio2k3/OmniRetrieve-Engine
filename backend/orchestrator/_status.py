@@ -155,7 +155,7 @@ def build_status(
         "docs_pdf_indexed":  indexed,
         "docs_pdf_pending":  pending,
         "recent_docs_24h":   recent_docs,
-        # Índice BM25
+        # Índice invertido TF
         "vocab_size":        idx.get("vocab_size", 0),
         "total_postings":    idx.get("total_postings", 0),
         # LSI

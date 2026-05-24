@@ -443,7 +443,7 @@ def get_document_metadata(
 def get_indexed_doc_count(db_path: Path = DB_PATH) -> int:
     """
     Devuelve el número de documentos distintos que tienen postings en el
-    índice BM25 (tabla postings).
+    índice invertido TF (tabla postings).
 
     Usado por el orquestador para decidir si hay suficientes documentos
     para reconstruir el modelo LSI.
