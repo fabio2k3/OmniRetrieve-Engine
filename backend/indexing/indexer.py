@@ -33,9 +33,6 @@ from backend.indexing.preprocessor import TextPreprocessor
 
 log = logging.getLogger(__name__)
 
-_FLUSH_EVERY = 5_000   # postings acumulados antes de volcar a la BD
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -50,6 +47,8 @@ class TFIndexer:
     preprocessor : instancia de TextPreprocessor (se crea una por defecto).
     field        : campo de texto a indexar — 'full_text', 'abstract' o 'both'.
     batch_size   : nº de documentos leídos por lote desde la BD.
+    flush_every  : postings acumulados en memoria antes de volcar a la BD.
+                   Configurable vía cfg.index_flush_every.
     """
 
     def __init__(
@@ -58,11 +57,13 @@ class TFIndexer:
         preprocessor: TextPreprocessor | None = None,
         field:        str                     = "full_text",
         batch_size:   int                     = 100,
+        flush_every:  int                     = 5_000,
     ) -> None:
         self.db_path      = Path(db_path)
         self.preprocessor = preprocessor or TextPreprocessor()
         self.field        = field
         self.batch_size   = batch_size
+        self.flush_every  = flush_every
 
     def init_schema(self) -> None:
         """Inicializa el esquema completo de la BD (idempotente)."""
@@ -153,7 +154,7 @@ class TFIndexer:
                     continue
                 batch.append((term_id, arxiv_id, freq))
 
-                if len(batch) >= _FLUSH_EVERY:
+                if len(batch) >= self.flush_every:
                     stats["postings_added"] += flush_postings(batch, self.db_path)
                     batch = []
 
