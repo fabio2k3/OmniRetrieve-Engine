@@ -43,7 +43,7 @@ from ...http     import USER_AGENT, _SSL_CTX
 from ..base_client import BaseClient
 from .constants    import (
     BASE_URL, ARXIV_HTML_URL, ARXIV_PDF_URL,
-    DEFAULT_SEARCH_QUERY, MAX_SIZE_MB, CHUNK_BYTES, LOG_EVERY_KB,
+    DEFAULT_SEARCH_QUERY, CHUNK_BYTES, LOG_EVERY_KB,
 )
 from . import api
 from .extractors import extract_html, extract_pdf
@@ -89,10 +89,12 @@ class ArxivClient(BaseClient):
     def __init__(
         self,
         search_query: str = DEFAULT_SEARCH_QUERY,
-        timeout: int = 30,
+        timeout:      int = 30,
+        max_size_mb:  int = 15,
     ) -> None:
         self.search_query = search_query
         self.timeout      = timeout
+        self.max_size_mb  = max_size_mb  # configurable vía cfg.crawler_max_pdf_mb
 
     # ── HTTP interno con rate-limiting ────────────────────────────────────────
 
@@ -123,7 +125,7 @@ class ArxivClient(BaseClient):
         Raises
         ------
         PermissionError : si robots.txt prohíbe la URL.
-        ValueError      : si la descarga supera ``MAX_SIZE_MB``.
+        ValueError      : si la descarga supera ``self.max_size_mb``.
         urllib.error.*  : ante errores de red o HTTP.
         """
         if not _robots.allowed(url, self.trusted_domains):
@@ -148,7 +150,7 @@ class ArxivClient(BaseClient):
             cl = resp.headers.get("Content-Length")
             if cl:
                 size_mb = int(cl) / (1024 * 1024)
-                if size_mb > MAX_SIZE_MB:
+                if size_mb > self.max_size_mb:
                     raise ValueError(f"Archivo demasiado grande ({size_mb:.1f} MB).")
                 logger.info("[ArxivClient] %.0f KB — descargando ...", int(cl) / 1024)
 
@@ -160,8 +162,8 @@ class ArxivClient(BaseClient):
                     break
                 buf.append(chunk)
                 downloaded += len(chunk)
-                if downloaded > MAX_SIZE_MB * 1024 * 1024:
-                    raise ValueError(f"Descarga supera {MAX_SIZE_MB} MB.")
+                if downloaded > self.max_size_mb * 1024 * 1024:
+                    raise ValueError(f"Descarga supera {self.max_size_mb} MB.")
                 if downloaded - last_log >= LOG_EVERY_KB * 1024:
                     t = time.monotonic() - start
                     logger.info(

@@ -21,7 +21,6 @@ AI_ML_CATEGORIES = [
 ]
 DEFAULT_SEARCH_QUERY = " OR ".join(f"cat:{c}" for c in AI_ML_CATEGORIES)
 
-# Límites de descarga
-MAX_SIZE_MB  = 15
+# Parámetros de streaming de descarga (internos, no configurables por usuario)
 CHUNK_BYTES  = 65_536    # tamaño de cada lectura en streaming
 LOG_EVERY_KB = 512       # frecuencia de log de progreso
