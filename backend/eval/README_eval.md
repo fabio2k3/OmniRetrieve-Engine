@@ -1,582 +1,338 @@
-# `backend/eval` — Sistema de Evaluación
+# OmniRetrieve — Módulo `eval`
 
-Pipeline completo para medir la calidad del sistema RAG, desde la generación
-del dataset hasta la detección de regresiones entre corridas.
+Sistema de evaluación offline en tres capas:
 
----
-
-## Índice
-
-1. [Prerequisitos](#prerequisitos)
-2. [Arquitectura](#arquitectura)
-3. [Tipos de casos de evaluación](#tipos-de-casos-de-evaluación)
-4. [Métricas calculadas](#métricas-calculadas)
-5. [Guía paso a paso](#guía-paso-a-paso)
-6. [Referencia de comandos](#referencia-de-comandos)
-7. [Interpretar los resultados](#interpretar-los-resultados)
-8. [Tests automáticos](#tests-automáticos)
-9. [Principio de diseño](#principio-de-diseño)
+1. **Generación de datasets** — crea casos de test a partir de chunks reales.
+2. **Evaluación de retrieval** — mide si el retriever devuelve el chunk correcto.
+3. **Evaluación RAG** — mide la calidad de la respuesta generada con juez LLM.
+4. **Comparación de corridas** — compara dos JSON de resultados y calcula deltas.
 
 ---
 
-## Prerequisitos
-
-Antes de correr cualquier evaluación necesitas:
-
-**1. El proyecto indexado** — la BD debe tener chunks y los índices construidos:
-```bash
-# Verificar que hay datos
-python -c "
-from backend.database.chunk_repository import get_chunk_stats
-from backend.database.schema import DB_PATH
-print(get_chunk_stats(DB_PATH))
-"
-# Esperas: {'total_chunks': N, 'embedded_chunks': N, 'pending_chunks': 0}
-```
-
-**2. Ollama corriendo** — necesario para los tipos `semantic` y `generated`, y para la evaluación RAG:
-```bash
-ollama list    # debe mostrar al menos un modelo (ej. llama3.2:3b)
-```
-
-**3. Variable de entorno para Tavily** (solo si quieres eval con búsqueda web):
-```powershell
-# Windows PowerShell
-$env:TAVILY_API_KEY="tvly-xxxxxxxxxxxxxxxxxxxxxxxx"
-```
-
----
-
-## Arquitectura
+## Estructura de archivos
 
 ```
 backend/eval/
+├── schema.py              ← EvalCase, EvalDataset (corpus de casos de test)
+├── dataset_generator.py   ← DatasetGenerator: genera EvalDataset desde chunks de BD
+├── paraphraser.py         ← Paraphraser: casos semánticos via Ollama
+├── query_generator.py     ← QueryGenerator: casos "generated" via Ollama
+├── generate_dataset.py    ← CLI: genera y guarda el EvalDataset
 │
-├── schema.py                  # EvalCase, EvalDataset — tipos de datos
-├── paraphraser.py             # Paráfrasis semántica con Ollama
-├── query_generator.py         # Generación de queries reales con Ollama
-├── dataset_generator.py       # Generador principal del dataset
-├── generate_dataset.py        # CLI de generación
+├── retrieval/             ← Evaluación del retriever (ground truth de chunks)
+│   ├── _types.py          ← RawHit, MetricSet, AggregatedMetrics
+│   ├── metrics.py         ← hit_at_k(), mrr(), ndcg_at_k() — funciones puras
+│   ├── scorer.py          ← score_case(): evalúa un EvalCase contra el retriever
+│   ├── aggregator.py      ← aggregate(): RawHit[] → AggregatedMetrics
+│   ├── runner.py          ← EvalRunner: itera EvalDataset y recoge RawHit
+│   ├── report.py          ← format_summary(), save_json(), load_json()
+│   ├── generate_dataset.py← CLI: genera EvalDataset para retrieval
+│   └── evaluate.py        ← CLI: ejecuta la evaluación de retrieval
 │
-├── retrieval/                 # Bloque 2 — Evaluación del retriever
-│   ├── _types.py              # RawHit, AggregatedMetrics, MetricSet
-│   ├── metrics.py             # hit_at_k(), mrr(), ndcg_at_k() — funciones puras
-│   ├── scorer.py              # score_case() → RawHit
-│   ├── aggregator.py          # aggregate() → AggregatedMetrics
-│   ├── runner.py              # EvalRunner (dataset + retriever → hits)
-│   ├── report.py              # format_summary(), save_json()
-│   └── evaluate.py            # CLI
+├── rag/                   ← Evaluación del pipeline RAG (sin ground truth de chunks)
+│   ├── schema.py          ← RAGQuery, RAGQuerySet (solo queries, sin expected_chunk_id)
+│   ├── _types.py          ← DimensionScore, RAGJudgement, DimensionStats, RAGAggregatedMetrics
+│   ├── prompts.py         ← faithfulness_prompt(), answer_relevance_prompt()
+│   ├── judge.py           ← OllamaJudge: grammar-constrained JSON + fallback parser
+│   ├── scorer.py          ← score_rag_query(): orquesta juez para una consulta
+│   ├── aggregator.py      ← aggregate(): RAGJudgement[] → RAGAggregatedMetrics
+│   ├── runner.py          ← RAGEvalRunner: itera RAGQuerySet y llama al pipeline
+│   ├── report.py          ← format_summary(), save_json(), save_judgements()
+│   ├── generate_dataset.py← CLI: convierte EvalDataset en RAGQuerySet
+│   ├── generate_queries.py← CLI: genera RAGQuerySet desde texto plano
+│   └── evaluate.py        ← CLI: ejecuta la evaluación RAG
 │
-├── rag/                       # Bloque 3 — Evaluación RAG end-to-end
-│   ├── _types.py              # DimensionScore, RAGJudgement, RAGAggregatedMetrics
-│   ├── prompts.py             # Plantillas de prompt del juez LLM
-│   ├── judge.py               # OllamaJudge — llama al LLM y parsea la respuesta
-│   ├── scorer.py              # score_rag_case() → RAGJudgement
-│   ├── aggregator.py          # aggregate() → RAGAggregatedMetrics
-│   ├── runner.py              # RAGEvalRunner
-│   ├── report.py              # format_summary(), save_json(), save_judgements()
-│   └── evaluate.py            # CLI
-│
-└── compare/                   # Bloque 4 — Comparador de corridas
-    ├── _types.py              # MetricDelta, ComparisonResult
-    ├── differ.py              # detect_type(), extract_metrics(), compare_reports()
-    ├── report.py              # format_summary(), save_json()
-    └── compare.py             # CLI
+└── compare/               ← Compara dos JSON de resultados (retrieval o RAG)
+    ├── _types.py          ← MetricDelta, ComparisonResult
+    ├── differ.py          ← detect_type(), extract_metrics(), compute_deltas()
+    ├── report.py          ← format_summary(), save_json(), load_json()
+    └── compare.py         ← CLI: python -m backend.eval.compare.compare A.json B.json
 ```
 
 ---
 
-## Tipos de casos de evaluación
+## Capa 1 — Generación de datasets
 
-El dataset puede contener tres tipos de casos. Cada uno estresa una parte diferente del sistema:
+### `EvalCase` y `EvalDataset` (`schema.py`)
 
-### `exact`
-La query es un **fragmento literal** extraído del interior del chunk (evitando los bordes para no trivializar el test).
+`EvalCase` representa un caso de test con **ground truth de chunk**:
 
-```
-chunk: "Attention mechanisms allow neural networks to focus on relevant parts..."
-query: "allow neural networks to focus on relevant parts of the input"
-```
+| Campo | Descripción |
+|---|---|
+| `case_id` | Identificador: `"exact_0042"`, `"semantic_0007"`, `"generated_0015"` |
+| `case_type` | `"exact"` \| `"semantic"` \| `"generated"` |
+| `query` | Texto que se envía al retriever o pipeline |
+| `expected_chunk_id` | `id` (PK) del chunk que debe aparecer en los resultados |
+| `expected_arxiv_id` | Documento fuente |
+| `expected_chunk_index` | Posición del chunk en el documento |
+| `source_text` | Texto íntegro del chunk de referencia |
+| `fragment_used` | Semilla usada para generar la query |
+| `paraphrase_model` | Modelo Ollama usado (`None` para `exact`) |
+| `metadata` | Campo libre (título del doc, char_count, etc.) |
 
-**Para qué sirve:** prueba el retrieval léxico (LSI). Si el sistema no recupera un chunk cuando la query es texto literal de ese chunk, hay un problema de indexación.
+`EvalDataset` es una colección de `EvalCase` con metadatos de generación.
+Se serializa en JSON y tiene métodos `exact_cases()`, `semantic_cases()`,
+`generated_cases()` y `save(path)` / `EvalDataset.load(path)`.
 
-**No requiere LLM.** Es el más rápido de generar.
+### Tres tipos de caso
 
----
-
-### `semantic`
-La query es una **paráfrasis** del fragmento generada por un LLM. Las palabras cambian completamente pero el significado se mantiene.
-
-```
-fragmento: "allow neural networks to focus on relevant parts of the input"
-query:     "enable deep learning models to selectively attend to important features"
-```
-
-**Para qué sirve:** prueba el retrieval semántico denso (FAISS + embeddings). Expone debilidades del modelo de embedding cuando no hay solapamiento léxico entre la query y el chunk.
-
-**Requiere Ollama.**
-
----
-
-### `generated`
-La query es una **pregunta real de usuario** generada por un LLM a partir del contenido completo del chunk. Es el tipo más representativo del uso real del sistema.
-
-```
-chunk:  "Attention mechanisms allow neural networks to focus on..."
-query:  "How do transformers decide which parts of the input to focus on?"
-```
-
-**Para qué sirve:** prueba el pipeline completo tal como lo usaría un usuario real. Una buena puntuación en `generated` indica que el sistema responde preguntas reales, no solo recupera fragmentos de texto.
-
-**Requiere Ollama. Recomendado para la evaluación RAG.**
-
----
-
-### Resumen comparativo
-
-| Tipo | LLM | Velocidad | Qué estresa |
+| Tipo | Cómo se genera | Qué estresa | LLM |
 |---|---|---|---|
-| `exact` | No | ★★★ Rápido | Indexación léxica (LSI) |
-| `semantic` | Sí | ★★ Medio | Retrieval denso (FAISS) |
-| `generated` | Sí | ★★ Medio | Pipeline completo (uso real) |
+| `exact` | Fragmento literal de 2 oraciones del chunk | Retrieval léxico (LSI) | No |
+| `semantic` | Paráfrasis del fragmento (Ollama) | Retrieval semántico (FAISS/dense) | Sí |
+| `generated` | Pregunta real de usuario sobre el chunk (Ollama) | Pipeline completo RAG | Sí |
 
----
+El tipo `generated` es el más representativo: los usuarios hacen preguntas,
+no pegan trozos de papers.
 
-## Métricas calculadas
+### `DatasetGenerator`
 
-### Métricas de retrieval
+```python
+from backend.eval.dataset_generator import DatasetGenerator
 
-Todas se calculan por tipo de caso (`exact`, `semantic`, `generated`) y globalmente.
+# Dataset completo (recomendado para eval RAG end-to-end)
+gen = DatasetGenerator(
+    sample_size       = 100,
+    include_exact     = True,
+    include_semantic  = False,     # requiere Ollama
+    include_generated = True,      # requiere Ollama
+    min_chunk_chars   = 200,
+    fragment_sentences= 2,
+    query_gen_model   = "llama3.2:3b",
+    seed              = 42,
+)
+ds = gen.generate()
+ds.save(Path("backend/data/eval/dataset.json"))
 
-#### Hit@K
-**¿Apareció el chunk correcto en los top-K resultados?**
-
-```
-Hit@K = nº de casos donde el chunk correcto está en los top K
-        ─────────────────────────────────────────────────────
-                      total de casos
-```
-
-Con ground truth de un solo chunk por caso, Hit@K = Precision@K = Recall@K.
-
-- **Rango:** 0.0 – 1.0
-- **Interpretación:** 0.74 → el chunk correcto aparece en top-K el 74% de las veces
-- **Referencia:** >0.70 es aceptable, >0.85 es bueno para un sistema RAG
-
-#### MRR — Mean Reciprocal Rank
-**¿En qué posición exacta aparece el chunk correcto?**
-
-```
-MRR = media de (1 / posición) para cada caso
-    = 1.0 si siempre aparece en posición 1
-    = 0.5 si siempre aparece en posición 2
-    = 0.0 si no aparece nunca
+print(ds)
+# EvalDataset(total=185, exact=95, semantic=0, generated=90, …)
 ```
 
-- **Rango:** 0.0 – 1.0
-- **Interpretación:** MRR=0.38 → el chunk correcto aparece de media en la posición ~2.6
-- **Por qué importa:** Hit@K dice si aparece, MRR dice qué tan arriba aparece. Un MRR alto significa que el chunk relevante sale primero, lo que reduce el trabajo del reranker.
+El muestreo es **estratificado por documento**: se toma un número proporcional
+de chunks de cada `arxiv_id` para garantizar cobertura temática diversa.
 
-#### NDCG@K — Normalized Discounted Cumulative Gain
-**¿Qué tan bien posicionado está el chunk correcto dentro del top-K?**
+### `Paraphraser` (`paraphraser.py`)
 
-```
-NDCG@K_i = 1 / log₂(posición + 1)   si posición ≤ K
-           0                          si no aparece
-```
+Genera paráfrasis con léxico diferente al original para el tipo `semantic`.
+Valida con similitud Jaccard: si `Jaccard(original, paráfrasis) > 0.60`
+el resultado se rechaza y se reintenta (hasta `max_retries`).
 
-Con relevancia binaria (un solo chunk correcto por query), NDCG@K es similar a MRR pero con una penalización logarítmica en lugar de lineal.
+Usa temperatura 0.55 (mayor diversidad léxica que la generación RAG).
 
-- **Rango:** 0.0 – 1.0
-- **Interpretación:** premia más encontrar el chunk en posición 1 que en posición 2, y más en posición 2 que en 3
-- **Cuándo usarlo:** cuando quieres penalizar más los fallos a encontrar el chunk en las primeras posiciones
+### `QueryGenerator` (`query_generator.py`)
 
-#### Δ Hit@K (delta)
-Diferencia de Hit@K entre tipos de caso:
+Genera preguntas realistas de usuario para el tipo `generated`.
+Validaciones más estrictas que `Paraphraser`:
 
-```
-Δ (semantic − exact)   → cuánto pierde el sistema cuando la query no comparte léxico
-Δ (generated − exact)  → cuánto pierde con queries reales de usuario
-```
-
-- **Referencia:** un delta de -0.10 a -0.20 es normal. Más de -0.30 indica que el modelo de embedding es débil en recuperación semántica.
-
----
-
-### Dimensiones de evaluación RAG
-
-Evaluadas por un LLM-as-judge (Ollama) que puntúa de 1 a 5 y devuelve una justificación. La puntuación se normaliza a [0.0, 1.0].
-
-#### Faithfulness
-**¿La respuesta generada está fundamentada en el contexto recuperado?**
-
-El juez verifica que cada afirmación de la respuesta se pueda respaldar directamente con alguna fuente. Penaliza respuestas que introducen hechos externos o contradicen las fuentes.
-
-- **Detecta:** alucinaciones del LLM generador
-- **Puntuación baja:** el sistema está inventando información no presente en los documentos
-- **Puntuación alta:** la respuesta es fiel a las fuentes, aunque sea incompleta
-
-#### Answer Relevance
-**¿La respuesta contesta la pregunta que se hizo?**
-
-El juez evalúa si la respuesta aborda directamente la query, sin desviarse a temas relacionados pero distintos.
-
-- **Detecta:** respuestas off-topic o que responden una pregunta diferente
-- **Puntuación baja:** el sistema recuperó chunks correctos pero el LLM generó una respuesta que no responde la pregunta
-- **Puntuación alta:** la respuesta es directa y pertinente
-
-#### Context Relevance
-**¿El contexto recuperado por el retriever es pertinente para responder la pregunta?**
-
-El juez evalúa los chunks recuperados, no la respuesta generada. Permite separar fallos del retriever de fallos del generador.
-
-- **Detecta:** fallos del pipeline de retrieval (LSI + FAISS + reranker)
-- **Puntuación baja:** el retriever está trayendo documentos incorrectos → el LLM no tiene material útil
-- **Puntuación alta:** los chunks recuperados son los adecuados para responder
-
-#### Escala de puntuación (todas las dimensiones)
-
-| Puntuación | Significado |
+| Validación | Criterio |
 |---|---|
-| 1 (0.00) | Muy deficiente |
-| 2 (0.25) | Deficiente |
-| 3 (0.50) | Aceptable |
-| 4 (0.75) | Bueno |
-| 5 (1.00) | Excelente |
+| Longitud mínima | ≥ 15 caracteres |
+| Longitud máxima | ≤ 250 caracteres |
+| Termina en `?` | Obligatorio |
+| Similitud Jaccard con el chunk | < 0.25 (umbral más estricto que Paraphraser) |
 
-#### Diagnóstico combinado
-
-| Context Relevance | Faithfulness | Diagnóstico |
-|---|---|---|
-| Alta | Alta | Sistema funcionando bien |
-| Alta | Baja | El LLM alucina aunque tenga buen contexto |
-| Baja | Alta | El retriever falla pero el LLM improvisa bien |
-| Baja | Baja | Fallo en retrieval y en generación |
+El LLM NO debe copiar frases del paper; la query debe ser lo que
+un usuario escribiría en un buscador.
 
 ---
 
-## Guía paso a paso
+## Capa 2 — Evaluación de retrieval (`eval/retrieval/`)
 
-### Paso 0 — Verificar prerequisitos
+Mide si el retriever devuelve el chunk correcto para cada `EvalCase`.
+Requiere `EvalDataset` (con `expected_chunk_id`).
 
-```bash
-# Verificar BD con datos
-python -c "
-from backend.database.chunk_repository import get_chunk_stats
-from backend.database.schema import DB_PATH
-stats = get_chunk_stats(DB_PATH)
-print(stats)
-"
+### Métricas (`metrics.py`)
 
-# Verificar Ollama (necesario para semantic, generated y eval RAG)
-ollama list
+Funciones puras sin imports del proyecto:
+
+| Función | Descripción |
+|---|---|
+| `hit_at_k(ranks, k)` | Fracción de casos donde el chunk relevante aparece en top-K |
+| `mrr(ranks)` | Mean Reciprocal Rank (promedio de 1/rank) |
+| `ndcg_at_k(ranks, k)` | NDCG@K con relevancia binaria |
+
+`ranks` es `list[int | None]`: posición 1-based del chunk esperado, o `None`
+si no aparece en los resultados.
+
+### Tipos de datos
+
+**`RawHit`** — resultado de un caso individual:
+`case_id`, `case_type`, `expected_chunk_id`, `found`, `rank`, `top_k`, `n_results_returned`
+
+**`MetricSet`** — métricas para un subset (all / exact / semantic):
+`hit_at_k`, `mrr`, `ndcg_at_k`, `n_cases`, `n_found`
+
+**`AggregatedMetrics`** — resultados agregados de una corrida completa:
+`all`, `exact` y `semantic` (cada uno un `MetricSet` o `None`)
+
+### Flujo de evaluación
+
+```python
+from backend.eval.retrieval.runner import EvalRunner
+from backend.eval.retrieval.aggregator import aggregate
+from backend.eval.retrieval.report import format_summary, save_json
+from backend.eval.schema import EvalDataset
+
+ds       = EvalDataset.load(Path("dataset.json"))
+runner   = EvalRunner(retriever=my_retriever, top_k=10)
+hits     = runner.run(ds)                    # → list[RawHit]
+metrics  = aggregate(hits, top_k=10)         # → AggregatedMetrics
+print(format_summary(metrics, "LSI v1"))
+save_json(metrics, Path("results_lsi.json"))
 ```
 
----
-
-### Paso 1 — Generar el dataset
-
-Empieza con un dataset pequeño para verificar que todo funciona:
-
-```bash
-# Dataset mínimo de prueba — solo exact, sin LLM, 10 casos
-python -m backend.eval.generate_dataset \
-    --exact \
-    --sample-size 10 \
-    --output backend/data/eval/test_dataset.json \
-    --verbose
-```
-
-Inspecciona que las queries tienen sentido:
-
-```bash
-python -c "
-import json
-ds = json.load(open('backend/data/eval/test_dataset.json'))
-for c in ds['cases'][:3]:
-    print('---')
-    print('TIPO :', c['case_type'])
-    print('QUERY:', c['query'])
-    print('CHUNK:', c['source_text'][:100])
-"
-```
-
-Si las queries parecen frases coherentes de papers científicos, está bien.
-
-**Dataset recomendado para evaluación completa:**
-
-```bash
-# Queries reales de usuario + fragmentos exactos (sin paráfrasis)
-python -m backend.eval.generate_dataset \
-    --exact \
-    --generated \
-    --sample-size 50 \
-    --output backend/data/eval/dataset.json
-
-# Dataset completo con los tres tipos
-python -m backend.eval.generate_dataset \
-    --exact \
-    --semantic \
-    --generated \
-    --sample-size 50 \
-    --output backend/data/eval/dataset_full.json
-```
-
-> El dataset se genera **una sola vez** y se reutiliza en todas las evaluaciones, para que los resultados sean comparables entre corridas.
-
----
-
-### Paso 2 — Evaluar el retriever
-
-Primero aísla FAISS (embedding-only) para tener una línea base:
+### CLI
 
 ```bash
 python -m backend.eval.retrieval.evaluate \
-    --dataset  backend/data/eval/dataset.json \
-    --retriever embedding \
-    --top-k 20 \
-    --output backend/data/eval/report_embedding.json
-```
-
-Luego el hybrid completo:
-
-```bash
-python -m backend.eval.retrieval.evaluate \
-    --dataset  backend/data/eval/dataset.json \
-    --retriever hybrid \
-    --top-k 20 \
-    --output backend/data/eval/report_hybrid.json
-```
-
-Con reranker activado (mejora el MRR):
-
-```bash
-python -m backend.eval.retrieval.evaluate \
-    --dataset  backend/data/eval/dataset.json \
-    --retriever hybrid \
-    --reranker \
-    --top-k 20 \
-    --output backend/data/eval/report_hybrid_reranker.json
+  --dataset backend/data/eval/dataset.json \
+  --retriever lsi \
+  --top-k 10 \
+  --output backend/data/eval/results_lsi.json
 ```
 
 ---
 
-### Paso 3 — Evaluar el pipeline RAG completo
+## Capa 3 — Evaluación RAG (`eval/rag/`)
 
-Este paso llama al pipeline entero (retrieval + generación LLM) y luego al juez para cada caso. Con 50 casos y llama3.2:3b cuenta con 10-20 minutos:
+Mide la calidad de la respuesta generada por el pipeline RAG.
+**No usa ground truth de chunks** — evalúa la respuesta en sí.
+
+### `RAGQuery` y `RAGQuerySet` (`rag/schema.py`)
+
+`RAGQuerySet` es una lista de `RAGQuery` (solo `query_id` + `query`).
+Se puede crear desde:
+- Un `EvalDataset` (extrae las queries)
+- Un fichero de texto plano (una query por línea)
+- Programáticamente
+
+```python
+from backend.eval.rag.schema import RAGQuerySet
+
+# Desde fichero de texto
+qs = RAGQuerySet.from_text_file(Path("mis_queries.txt"))
+qs.save(Path("query_set.json"))
+
+# Carga
+qs = RAGQuerySet.load(Path("query_set.json"))
+```
+
+### Dimensiones evaluadas
+
+| Dimensión | Pregunta al juez |
+|---|---|
+| `faithfulness` | ¿Está la respuesta fundamentada en los documentos recuperados? Detecta alucinaciones |
+| `answer_relevance` | ¿Responde la respuesta la pregunta de forma útil y pertinente? |
+
+La puntuación es **1–5** (escala Likert) normalizada a **[0.0, 1.0]**.
+
+### `OllamaJudge` (`rag/judge.py`)
+
+El juez envía los prompts a Ollama con `format="json"` (grammar-constrained
+decoding a nivel de tokens), lo que garantiza JSON válido incluso con modelos
+pequeños. Si el cliente Ollama no soporta `format`, reintenta sin él.
+
+Para parsear la respuesta tiene 4 estrategias en cascada:
+1. Parseo directo del texto completo
+2. Extracción de bloque markdown ` ```json … ``` `
+3. Primer objeto `{ … }` encontrado
+4. Reparación básica de JSON malformado (comillas faltantes en `reason`)
+
+### Flujo de evaluación RAG
+
+```python
+from backend.eval.rag.runner import RAGEvalRunner
+from backend.eval.rag.judge import OllamaJudge
+from backend.eval.rag.aggregator import aggregate
+from backend.eval.rag.report import format_summary, save_json, save_judgements
+from backend.eval.rag.schema import RAGQuerySet
+
+qs       = RAGQuerySet.load(Path("query_set.json"))
+judge    = OllamaJudge(model="llama3.2:3b", temperature=0.0)
+runner   = RAGEvalRunner(pipeline=my_rag, judge=judge)
+judgements = runner.run(qs)              # → list[RAGJudgement]
+metrics    = aggregate(judgements)       # → RAGAggregatedMetrics
+print(format_summary(metrics, "HybridRAG v2"))
+save_json(metrics, Path("rag_results.json"))
+save_judgements(judgements, Path("rag_judgements.json"))
+```
+
+### `score_rag_query()` (`rag/scorer.py`)
+
+```python
+score_rag_query(
+    query_id        = "q_0001",
+    query           = "How does attention work?",
+    pipeline_output = rag.ask("How does attention work?", include_debug=True),
+    judge           = OllamaJudge(),
+) → RAGJudgement
+```
+
+Llama al juez para cada dimensión por separado. Si alguna falla, anota el
+error en `judge_error` pero devuelve igualmente el `RAGJudgement` sin abortar.
+
+### CLI
 
 ```bash
 python -m backend.eval.rag.evaluate \
-    --dataset    backend/data/eval/dataset.json \
-    --judge-model llama3.2:3b \
-    --top-k 10 \
-    --output     backend/data/eval/rag_report.json \
-    --judgements backend/data/eval/rag_judgements.json
-```
-
-Para inspeccionar qué dijo el juez caso por caso:
-
-```bash
-python -c "
-import json
-js = json.load(open('backend/data/eval/rag_judgements.json'))['judgements']
-for j in js[:5]:
-    print('---')
-    print('QUERY :', j['query'])
-    print('ANSWER:', j['answer'][:120])
-    if j['faithfulness']:
-        print('Faith :', j['faithfulness']['raw_score'], '—', j['faithfulness']['reason'])
-    if j['answer_relevance']:
-        print('Relev :', j['answer_relevance']['raw_score'], '—', j['answer_relevance']['reason'])
-"
+  --queries backend/data/eval/query_set.json \
+  --output  backend/data/eval/rag_results.json \
+  --judge-model llama3.2:3b
 ```
 
 ---
 
-### Paso 4 — Comparar dos corridas
+## Capa 4 — Comparación de corridas (`eval/compare/`)
 
-Después de cambiar un parámetro del sistema (modelo de embedding, rrf_k, tamaño de chunk, etc.):
+Compara dos JSON de resultados (retrieval o RAG) y calcula deltas:
 
 ```bash
 python -m backend.eval.compare.compare \
-    --baseline  backend/data/eval/report_hybrid.json \
-    --candidate backend/data/eval/report_hybrid_reranker.json \
-    --output    backend/data/eval/comparison_reranker.json
+  backend/data/eval/results_lsi.json \
+  backend/data/eval/results_hybrid.json
 ```
 
-Salida esperada:
-
-```
-============================================================
-  Comparison  [retrieval]
-  Baseline  : report_hybrid.json
-  Candidate : report_hybrid_reranker.json
-  Threshold : ±0.005
-============================================================
-
-  ── ✓  Improved ─────────────────────────────────────────
-  ✓  overall.mrr          base=0.3821  cand=0.5100  Δ=+0.1279  (+33.5%)
-  ✓  overall.ndcg_at_k    base=0.4189  cand=0.5430  Δ=+0.1241  (+29.6%)
-
-  ── ~  Neutral ───────────────────────────────────────────
-  ~  overall.hit_at_k     base=0.5426  cand=0.5532  Δ=+0.0106  (+2.0%)
-
-============================================================
-  Improved=6  Degraded=0  Neutral=6  Total=12
-============================================================
-```
-
-> **Integración CI/CD:** el comparador devuelve código de salida `1` si hay regresiones, `0` si no. Útil para bloquear merges automáticamente si una métrica empeora.
+`detect_type()` determina automáticamente si los JSON son de retrieval o RAG
+comparando sus claves. `compute_deltas()` genera un `MetricDelta` por métrica
+con el valor base, el nuevo valor, la diferencia absoluta y el estado
+(`improved`, `degraded`, `neutral`).
 
 ---
 
-## Referencia de comandos
-
-### Generar dataset
+## Tests
 
 ```bash
-python -m backend.eval.generate_dataset \
-    --exact                          # incluir casos exact
-    --semantic                       # incluir casos semantic (paráfrasis LLM)
-    --generated                      # incluir casos generated (queries reales LLM)
-    --sample-size 50                 # chunks a muestrear
-    --model llama3.2:3b              # modelo Ollama para LLM calls
-    --output backend/data/eval/dataset.json
-    --min-chars 200                  # tamaño mínimo de chunk
-    --seed 42                        # semilla para reproducibilidad
-    --verbose
+# Capa de dataset (schema, paraphraser, generators)
+pytest backend/tests/eval/ -v
+
+pytest backend/tests/eval/test_eval_schema.py        -v  # EvalCase, EvalDataset
+pytest backend/tests/eval/test_paraphraser.py        -v  # _jaccard, Paraphraser
+pytest backend/tests/eval/test_dataset_generator.py  -v  # DatasetGenerator
+pytest backend/tests/eval/test_query_generator.py    -v  # QueryGenerator, _is_valid
+
+# Evaluación RAG
+pytest backend/tests/eval_rag/ -v
+
+pytest backend/tests/eval_rag/test_prompts.py        -v  # faithfulness_prompt, answer_relevance_prompt
+pytest backend/tests/eval_rag/test_scorer.py         -v  # score_rag_query con _FixedJudge
+pytest backend/tests/eval_rag/test_aggregator.py     -v  # aggregate(), estadísticas por dimensión
+pytest backend/tests/eval_rag/test_runner.py         -v  # RAGEvalRunner con RAGQuerySet
+pytest backend/tests/eval_rag/test_judge.py          -v  # OllamaJudge, _extract_json()
+pytest backend/tests/eval_rag/test_report.py         -v  # format_summary, save_json, save_judgements
+
+# Evaluación de retrieval
+pytest backend/tests/eval_retrieval/ -v
+
+# Comparación
+pytest backend/tests/eval_compare/ -v
 ```
 
-### Evaluar retrieval
+### Estrategia de tests
 
-```bash
-python -m backend.eval.retrieval.evaluate \
-    --dataset  backend/data/eval/dataset.json \
-    --retriever hybrid               # hybrid | embedding | lsi
-    --top-k 20                       # ventana de evaluación
-    --reranker                       # activar CrossEncoderReranker
-    --output backend/data/eval/report.json \
-    --verbose
-```
-
-### Evaluar RAG
-
-```bash
-python -m backend.eval.rag.evaluate \
-    --dataset    backend/data/eval/dataset.json \
-    --judge-model llama3.2:3b        # modelo Ollama para el juez
-    --top-k 10                       # chunks a recuperar por query
-    --output     backend/data/eval/rag_report.json \
-    --judgements backend/data/eval/rag_judgements.json \
-    --verbose
-```
-
-### Comparar corridas
-
-```bash
-python -m backend.eval.compare.compare \
-    --baseline  backend/data/eval/report_v1.json \
-    --candidate backend/data/eval/report_v2.json \
-    --output    backend/data/eval/comparison.json \
-    --threshold 0.005                # mínimo delta para ser "improved/degraded"
-```
-
-### Correr tests automáticos
-
-```bash
-# Suite completa (sin dependencias externas — todo mockeado)
-pytest backend/tests/test_eval_dataset.py \
-                    backend/tests/test_query_generator.py \
-                    backend/tests/eval_retrieval/ \
-                    backend/tests/eval_rag/ \
-                    backend/tests/eval_compare/ \
-                    backend/tests/retrieval/ \
-                    -v
-```
-
----
-
-## Interpretar los resultados
-
-### ¿Mis métricas de retrieval son buenas?
-
-| Hit@K (K=10) | Interpretación |
-|---|---|
-| < 0.40 | Problema grave — el retriever falla en la mayoría de casos |
-| 0.40 – 0.60 | Mejorable — revisar modelo de embedding o parámetros RRF |
-| 0.60 – 0.80 | Aceptable para un sistema en desarrollo |
-| > 0.80 | Bueno |
-
-### ¿El delta semántico es normal?
-
-Un delta negativo entre `exact` y `semantic`/`generated` es esperado:
-
-| Δ Hit@K | Interpretación |
-|---|---|
-| > -0.10 | Excelente — el modelo de embedding es muy robusto |
-| -0.10 a -0.20 | Normal con modelos generales (MiniLM, MPNet) |
-| -0.20 a -0.35 | El modelo de embedding lucha con el dominio científico |
-| < -0.35 | Considera cambiar a un modelo domain-specific (specter, scibert) |
-
-### ¿Mis métricas RAG son buenas?
-
-| Dimensión | Puntuación preocupante | Puntuación objetivo |
-|---|---|---|
-| Faithfulness | < 0.50 | > 0.75 |
-| Answer Relevance | < 0.55 | > 0.70 |
-| Context Relevance | < 0.45 | > 0.65 |
-
-Si **Context Relevance** es baja → el problema es el retriever, no el LLM.
-Si **Faithfulness** es baja con **Context Relevance** alta → el LLM está alucinando.
-
----
-
-## Tests automáticos
-
-Todos los tests usan BD en memoria y Ollama mockeado — no requieren servicios externos.
-
-```
-backend/tests/
-├── test_eval_dataset.py          # 26 tests — EvalCase, EvalDataset, DatasetGenerator
-├── test_query_generator.py       # 11 tests — QueryGenerator, validaciones
-├── eval_retrieval/
-│   ├── test_metrics.py           # 32 tests — hit_at_k, mrr, ndcg_at_k (fórmulas puras)
-│   ├── test_scorer.py            # 10 tests — score_case()
-│   ├── test_aggregator.py        #  9 tests — aggregate()
-│   ├── test_runner.py            #  8 tests — EvalRunner
-│   └── test_report.py            # 14 tests — format_summary, save_json
-├── eval_rag/
-│   ├── test_prompts.py           # 14 tests — plantillas de prompt
-│   ├── test_judge.py             # 17 tests — OllamaJudge, parseo JSON
-│   ├── test_scorer.py            # 10 tests — score_rag_case()
-│   ├── test_aggregator.py        # 10 tests — aggregate()
-│   ├── test_runner.py            #  8 tests — RAGEvalRunner
-│   └── test_report.py            # 18 tests — format_summary, save_json
-├── eval_compare/
-│   ├── test_differ.py            # 25 tests — detect_type, compute_deltas
-│   └── test_report.py            # 12 tests — format_summary, save_json
-└── retrieval/
-    ├── test_lsi_query.py         # 14 tests — QueryVectorizer
-    ├── test_lsi_retriever.py     # 17 tests — LSIRetriever, chunk_ids reales
-    └── test_factory.py           # 12 tests — build_hybrid_retriever, etc.
-```
-
----
-
-## Principio de diseño
-
-Cada archivo tiene exactamente **una razón para cambiar**:
-
-| Archivo | Cambia si… |
-|---|---|
-| `schema.py` | Cambias la estructura de EvalCase / EvalDataset |
-| `paraphraser.py` | Cambias la estrategia de paráfrasis |
-| `query_generator.py` | Cambias cómo el LLM genera queries de usuario |
-| `dataset_generator.py` | Cambias el algoritmo de muestreo |
-| `retrieval/metrics.py` | Cambias la fórmula de Hit@K, MRR o NDCG |
-| `retrieval/scorer.py` | Cambias cómo se detecta un chunk en los resultados |
-| `rag/prompts.py` | Cambias las instrucciones del juez LLM |
-| `rag/judge.py` | Cambias el backend LLM (ej. Ollama → OpenAI) |
-| `compare/differ.py` | Cambias qué métricas se extraen o cómo se calculan los deltas |
-| Cualquier `report.py` | Cambias el formato de salida |
-| Cualquier `evaluate.py` | Cambias los argumentos de la CLI |
+- **Sin Ollama**: `Paraphraser`, `QueryGenerator`, `OllamaJudge` y `RAGEvalRunner`
+  se testean con `MagicMock` o clases `_FixedJudge` que devuelven respuestas
+  controladas, sin llamadas reales al LLM.
+- **Sin BD**: `DatasetGenerator` se testea con una conexión SQLite en memoria
+  (`":memory:"`) creada en cada test.
+- **Funciones puras**: `metrics.py` se testea directamente con listas de `rank`
+  sin ningún mock.
