@@ -1,7 +1,8 @@
 # OmniRetrieve-Engine
 
-Motor de búsqueda semántica e IA generativa sobre artículos académicos de arXiv.  
-Combina LSI, embeddings densos (FAISS), reranking con CrossEncoder, búsqueda web y RAG con Ollama.
+Motor de búsqueda semántica y generación aumentada por recuperación (RAG)
+sobre artículos académicos de arXiv. Combina LSI, embeddings densos (FAISS),
+reranking con CrossEncoder, búsqueda web y generación con Ollama.
 
 ---
 
@@ -10,33 +11,34 @@ Combina LSI, embeddings densos (FAISS), reranking con CrossEncoder, búsqueda we
 ```
 OmniRetrieve-Engine/
 ├── backend/
-│   └── backend/
-│       ├── crawler/          — descarga de metadatos y PDFs de arXiv
-│       ├── database/         — esquema SQLite y repositorios
-│       ├── embedding/        — embeddings incrementales + FAISS
-│       ├── indexing/         — índice invertido de frecuencias crudas (TF)
-│       ├── orchestrator/     — coordinador de todos los módulos
-│       ├── qrf/              — expansión de consultas
-│       ├── rag/              — generación con Ollama
-│       ├── retrieval/        — LSI retriever, embedding retriever, hybrid retriever y reranker
-│       ├── tools/            — utilidades de mantenimiento
-│       └── web_search/       — búsqueda web (Tavily + DuckDuckGo fallback)
+│   ├── crawler/        — descarga continua de metadatos y texto de arXiv
+│   ├── database/       — esquema SQLite único y repositorios por módulo
+│   ├── embedding/      — embeddings incrementales con sentence-transformers + FAISS
+│   ├── eval/           — evaluación automática de retrieval y RAG
+│   ├── indexing/       — índice invertido de frecuencias crudas (TF)
+│   ├── orchestrator/   — coordinador de hilos y API pública
+│   ├── qrf/            — refinamiento de consultas (LCE + BRF + Rocchio + MMR)
+│   ├── rag/            — generación grounded con Ollama
+│   ├── retrieval/      — LSI, FAISS, Hybrid y CrossEncoder
+│   ├── tools/          — utilidades de mantenimiento y monitorización
+│   ├── web_search/     — búsqueda web (Tavily + SiteSearcher académico)
+│   └── requirements.txt
 ├── frontend/
-│   └── frontend/
-│       └── app.py            — interfaz Streamlit
+│   └── app.py          — interfaz Streamlit
 ├── .streamlit/
-│   └── config.toml           — configuración de Streamlit
-└── .env                      — variables de entorno (API keys)
+│   └── config.toml     — configuración de Streamlit
+└── .env                — variables de entorno (API keys)
 ```
 
-Cada módulo tiene su propio README con detalles de arquitectura, parámetros y ejemplos de uso.
+Cada módulo tiene su propio `README_<modulo>.md` con detalles de arquitectura,
+parámetros y ejemplos de uso.
 
 ---
 
 ## Requisitos previos
 
 - **Python 3.10 o superior**
-- **[Ollama](https://ollama.com/download)** — app de escritorio instalada y corriendo
+- **[Ollama](https://ollama.com/download)** — instalado y corriendo
 - (Opcional) cuenta en [Tavily](https://tavily.com) para búsqueda web enriquecida
 
 ---
@@ -62,46 +64,45 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Instalar dependencias Python
+### 3. Instalar dependencias
 
 ```bash
-pip install -r backend/backend/requirements.txt
+pip install -r backend/requirements.txt
 pip install streamlit
 ```
 
 ### 4. Descargar el modelo LLM con Ollama
 
-Asegúrate de que la app de escritorio de Ollama esté abierta (icono en la bandeja del sistema), luego ejecuta:
+Asegúrate de que Ollama esté corriendo (icono en la bandeja del sistema), luego:
 
 ```bash
 ollama pull llama3.2:3b
 ```
 
-> **Modelos alternativos** (mayor calidad, más VRAM):
+> Modelos alternativos (mayor calidad, más VRAM):
 > ```bash
 > ollama pull llama3.1:8b
 > ollama pull mistral:7b
 > ```
-> Si cambias el modelo, actualiza `rag_llm_model` en `orchestrator/config.py`.
+> Si cambias el modelo actualiza `rag_llm_model` en `backend/orchestrator/config.py`.
 
-Verifica que Ollama esté respondiendo en: `http://localhost:11434`  
-Debe mostrar: `Ollama is running`
+Verifica que Ollama responda en `http://localhost:11434` — debe mostrar `Ollama is running`.
 
-### 5. Configurar variables de entorno
+### 5. Variables de entorno
 
-Crea un archivo `.env` en la raíz del proyecto:
+Crea `.env` en la raíz del proyecto:
 
 ```env
-# Búsqueda web enriquecida (opcional — sin esta key usa DuckDuckGo gratis)
+# Búsqueda web enriquecida (opcional)
+# Sin esta key el sistema usa SiteSearcher (DuckDuckGo restringido a dominios académicos)
 TAVILY_API_KEY=tvly-tu-key-aqui
 ```
 
-> Obtén tu key gratuita en [app.tavily.com](https://app.tavily.com).  
-> Sin esta key el sistema funciona igual pero usa DuckDuckGo como fallback.
+Obtén tu key gratuita en [app.tavily.com](https://app.tavily.com).
 
 ### 6. Configurar Streamlit
 
-Crea el archivo `.streamlit/config.toml` en la raíz del proyecto:
+Crea `.streamlit/config.toml`:
 
 ```toml
 [server]
@@ -110,63 +111,95 @@ fileWatcherType = "none"
 
 ---
 
-## Agregar Ollama al PATH (solo Windows)
-
-Si al ejecutar `ollama pull` recibes *"El término 'ollama' no se reconoce..."*:
-
-1. Abre **Inicio** → busca *"Variables de entorno del sistema"*
-2. **Variables de entorno** → selecciona `Path` en Variables del sistema → **Editar**
-3. Clic en **Nuevo** → pega:
-   ```
-   C:\Users\<tu-usuario>\AppData\Local\Programs\Ollama
-   ```
-4. Acepta todo y **reabre la terminal**
-
----
-
 ## Ejecución
+
 Desde la raíz del proyecto:
+
+```bash
+streamlit run frontend/app.py
+```
+
+O bien usando el lanzador del orquestador, que acepta flags para ajustar
+la configuración sin editar código:
 
 ```bash
 python -m backend.orchestrator.main
 ```
 
-Abre Streamlit automáticamente en `http://localhost:8501`.
+Ambos comandos abren la interfaz en `http://localhost:8501`.
 
-Opciones útiles:
+### Opciones del lanzador
 
 ```bash
 python -m backend.orchestrator.main --port 8080
 python -m backend.orchestrator.main --no-browser
-python -m backend.orchestrator.main --lsi-interval 3600
-python -m backend.orchestrator.main --lsi-k 200
+python -m backend.orchestrator.main --lsi-k 200 --lsi-interval 3600
+python -m backend.orchestrator.main --embed-model all-mpnet-base-v2
+python -m backend.orchestrator.main --web-threshold 0.4
+python -m backend.orchestrator.main --lsi-min-df 5   # corpus pequeño
 ```
+
 ---
 
 ## Primer arranque
 
-El primer arranque construye todos los modelos desde cero. El proceso sigue este orden:
+El primer arranque construye todos los modelos desde cero siguiendo este orden:
 
 ```
-1. LSI rebuild   — puede tardar 1-2 min la primera vez
-2. Embedding     — genera embeddings pendientes + construye FAISS
-3. QRF + RAG     — carga los pipelines de búsqueda y generación
-4. Crawler       — descarga artículos de arXiv en segundo plano
-5. Indexing      — indexa nuevos documentos en la BD
+1. LSI rebuild    — 1–2 min la primera vez (construye el modelo semántico)
+2. Embedding      — vectoriza chunks pendientes y construye el índice FAISS
+3. QRF + RAG      — carga los pipelines de búsqueda y generación
+4. Crawler        — descarga artículos de arXiv en segundo plano
+5. Indexing       — indexa nuevos documentos en el índice TF
 ```
 
-El **sidebar** muestra el estado de cada componente en tiempo real. En arranques posteriores, LSI carga el modelo guardado en disco en segundos.
+El **sidebar** muestra el estado de cada componente en tiempo real.
+En arranques posteriores el modelo LSI carga desde disco en segundos.
 
 ---
-
 
 ## Modelos utilizados
 
 | Componente | Modelo | Descarga |
-|-----------|--------|----------|
+|---|---|---|
 | Embeddings | `all-MiniLM-L6-v2` | Automática (sentence-transformers) |
 | Reranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Automática (sentence-transformers) |
 | Generación LLM | `llama3.2:3b` | Manual: `ollama pull llama3.2:3b` |
+
+---
+
+## Tests
+
+```bash
+# Todos los tests (excluye tests de red que requieren arXiv)
+pytest backend/tests/ -v -m "not network"
+
+# Por módulo
+pytest backend/tests/crawler/     -v -m "not network"
+pytest backend/tests/embedding/   -v
+pytest backend/tests/indexing/    -v
+pytest backend/tests/retrieval/   -v
+pytest backend/tests/qrf/         -v
+pytest backend/tests/rag/         -v
+pytest backend/tests/eval/        -v
+pytest backend/tests/integration/ -v
+
+# Con cobertura
+pytest backend/tests/ -v -m "not network" --cov=backend --cov-report=term-missing
+```
+
+---
+
+## Agregar Ollama al PATH (solo Windows)
+
+Si `ollama pull` devuelve *"El término 'ollama' no se reconoce..."*:
+
+1. Inicio → busca *"Variables de entorno del sistema"*
+2. Variables del sistema → `Path` → **Editar** → **Nuevo**:
+   ```
+   C:\Users\<tu-usuario>\AppData\Local\Programs\Ollama
+   ```
+3. Acepta y reabre la terminal.
 
 ---
 
@@ -176,10 +209,15 @@ El **sidebar** muestra el estado de cada componente en tiempo real. En arranques
 Lanza siempre desde la raíz del proyecto, no desde subcarpetas.
 
 **`Search unavailable: Orchestrator not ready`**  
-El modelo LSI aún está cargando. Observa el sidebar — cuando LSI muestre 🟢 la búsqueda estará disponible.
+El modelo LSI aún está cargando. Espera a que el sidebar muestre 🟢 en LSI.
 
 **`RAG generation falló`**  
-Verifica que Ollama esté corriendo (`http://localhost:11434`) y que el modelo esté descargado (`ollama list`).
+Verifica que Ollama esté corriendo (`http://localhost:11434`) y que el modelo
+esté descargado (`ollama list`).
 
-**Advertencias `Accessing __path__` o `No module named 'torchvision'` en consola**  
+**Advertencias `Accessing __path__` o `No module named 'torchvision'`**  
 Son inofensivas. El archivo `.streamlit/config.toml` con `fileWatcherType = "none"` las suprime.
+
+**`Vocabulario vacío tras filtrado (min_df=20)`**  
+El corpus es demasiado pequeño para los filtros por defecto.
+Usa `--lsi-min-df 1` hasta tener al menos 500 documentos indexados.
