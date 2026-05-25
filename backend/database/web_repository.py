@@ -1,22 +1,25 @@
 """
 web_repository.py
 =================
-Persiste en la base de datos los documentos encontrados por la búsqueda web.
+Repositorio de acceso a BD para los resultados de búsqueda web.
 
-Cambio respecto a la versión anterior
---------------------------------------
-Los resultados web se guardan en la tabla ``web_search_results`` en lugar
-de en ``documents``. Esto evita dos problemas:
+Responsabilidad
+---------------
+Persistir los resultados devueltos por WebSearcher / SiteSearcher en la
+tabla ``web_search_results``, separada del corpus científico principal.
 
-  1. Contaminación del corpus local: los docs web no deben mezclarse con
-     los papers de arXiv en el índice TF ni en el modelo LSI.
-  2. Indexación accidental: el watcher de indexación procesaba TODOS los
-     docs pendientes en ``documents``, incluyendo los web, lo que causaba
-     conteos incorrectos y ralentizaba la indexación real.
+Diseño
+------
+Los resultados web NO se guardan en ``documents`` para evitar:
+  - Contaminar el corpus: los docs web no deben mezclarse con papers de
+    arXiv en el índice TF ni en el modelo LSI.
+  - Indexación accidental: el watcher de indexación procesa todos los
+    docs pendientes en ``documents``; incluir resultados web causaría
+    conteos incorrectos y ralentizaría la indexación real.
 
-Los resultados web solo se usan de forma efímera durante el pipeline de
-consulta. Se guardan en ``web_search_results`` únicamente para auditoría
-y para evitar fetchear la misma URL varias veces en futuras búsquedas.
+Los resultados se guardan en ``web_search_results`` para:
+  - Auditoría y monitorización (``inspect_db --web N``).
+  - Caché de URLs ya visitadas (``get_cached_result(url)``).
 """
 
 from __future__ import annotations
@@ -49,7 +52,7 @@ def save_web_results(
     Parámetros
     ----------
     query   : consulta original que generó estos resultados.
-    results : lista de dicts de WebSearcher / DuckDuckGoSearcher.
+    results : lista de dicts normalizados de WebSearcher / SiteSearcher.
     db_path : ruta a la BD SQLite.
     """
     conn = get_connection(db_path)

@@ -44,7 +44,7 @@ from pathlib import Path
 from backend.database.schema import DB_PATH
 from backend.web_search.searcher import WebSearcher
 from backend.web_search.sufficiency import SufficiencyChecker
-from backend.web_search.web_repository import save_web_results
+from backend.database.web_repository import save_web_results
 
 logging.basicConfig(
     level=logging.INFO,
