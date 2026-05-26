@@ -104,7 +104,7 @@ def _fast_load(
         log.info(
             "[lsi] Modelo cargado rapidamente — %d docs | %d terminos. "
             "Rebuild en segundo plano...",
-            len(retriever.model.doc_ids),
+            len(retriever._model.doc_ids),
             len(retriever._word_index),
         )
     except Exception as exc:
