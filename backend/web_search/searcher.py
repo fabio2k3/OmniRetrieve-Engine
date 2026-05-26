@@ -129,6 +129,7 @@ class WebSearcher:
                 query=query,
                 max_results=n,
                 search_depth=self.search_depth,
+                include_domains=self._fallback.seed_domains,
                 include_answer=False,
                 include_raw_content=False,
             )
