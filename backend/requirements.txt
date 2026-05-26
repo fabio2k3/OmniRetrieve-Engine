@@ -39,7 +39,7 @@ faiss-cpu>=1.7.4               # índice vectorial (cambiar a faiss-gpu si hay G
 
 # ── Web Search ───────────────────────────────────────────────────────────────
 tavily-python>=0.3.0       # búsqueda web principal (requiere TAVILY_API_KEY en .env)
-ddgs>=6.0.0   # fallback gratuito sin API key
+ddgs>=6.0.0  # fallback gratuito sin API key
 
 
 # ── RAG — generación LLM (elige UNA opción) ──────────────────────────────────
@@ -53,3 +53,4 @@ streamlit
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=7.0.0
+pytest-cov>=4.0.0    # cobertura de tests (opcional)
