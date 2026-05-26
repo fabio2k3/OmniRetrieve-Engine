@@ -32,7 +32,8 @@ from pathlib import Path
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-from backend.database.schema import DB_PATH, get_connection
+from backend.database.chunk_repository import get_chunks_with_metadata_by_arxiv_ids
+from backend.database.schema import DB_PATH
 from backend.indexing.preprocessor import TextPreprocessor
 from .lsi_model import LSIModel, MODEL_PATH
 from .lsi_query import QueryVectorizer, build_word_index
@@ -171,26 +172,7 @@ class LSIRetriever(RetrieverProtocol):
         arxiv_ids = [aid for aid, _ in scored_docs]
         score_map = {aid: score for aid, score in scored_docs}
 
-        placeholders = ",".join("?" * len(arxiv_ids))
-        conn = get_connection(self._db_path)
-        try:
-            rows = conn.execute(
-                f"""
-                SELECT c.id        AS chunk_id,
-                       c.arxiv_id,
-                       c.chunk_index,
-                       c.text,
-                       d.title,
-                       d.authors,
-                       d.pdf_url
-                FROM   chunks    c
-                JOIN   documents d USING (arxiv_id)
-                WHERE  c.arxiv_id IN ({placeholders})
-                """,
-                arxiv_ids,
-            ).fetchall()
-        finally:
-            conn.close()
+        rows = get_chunks_with_metadata_by_arxiv_ids(arxiv_ids, db_path=self._db_path)
 
         results: list[RetrievalResult] = []
         for row in rows:

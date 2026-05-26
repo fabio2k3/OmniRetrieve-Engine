@@ -85,12 +85,15 @@ def main() -> None:
             init_embedding_schema,
             get_embedding_stats,
         )
+        from backend.database.embedding_repository import get_embedding_meta
         init_embedding_schema(args.db)
         s = get_embedding_stats(args.db)
+        model_name = get_embedding_meta("model_name", db_path=args.db) or "—"
         print(f"\n  Total chunks     : {s['total_chunks']:,}")
         print(f"  Embedidos        : {s['embedded_chunks']:,}")
         print(f"  Pendientes       : {s['pending_chunks']:,}")
-        print(f"  Último modelo    : {s.get('last_index_type') or '—'}")
+        print(f"  Modelo           : {model_name}")
+        print(f"  Tipo índice FAISS: {s.get('last_index_type') or '—'}")
         print(f"  Última build     : {s.get('last_build_at') or '—'}")
         print(f"  Vectores FAISS   : {s.get('last_n_vectors', 0):,}\n")
         return

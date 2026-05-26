@@ -4,6 +4,7 @@ test_report.py
 Tests de report.py para el módulo RAG.
 
 Verifica formato de texto, serialización JSON y guardado de veredictos.
+Adaptado a la versión simplificada: solo faithfulness + answer_relevance.
 """
 
 import json
@@ -16,7 +17,7 @@ from backend.eval.rag._types import (
     DimensionScore, DimensionStats, RAGAggregatedMetrics, RAGJudgement
 )
 from backend.eval.rag.report import (
-    format_summary, save_json, load_json, save_judgements
+    format_summary, save_json, save_judgements
 )
 
 
@@ -28,30 +29,23 @@ def _stats(mean=0.75) -> DimensionStats:
     return DimensionStats(n_cases=10, mean=mean, minimum=0.25, maximum=1.0)
 
 
-def _metrics(with_by_type: bool = True) -> RAGAggregatedMetrics:
-    m = RAGAggregatedMetrics(
+def _metrics() -> RAGAggregatedMetrics:
+    return RAGAggregatedMetrics(
         n_total=20,
         n_errors=2,
         faithfulness=_stats(0.8),
         answer_relevance=_stats(0.7),
-        context_relevance=_stats(0.6),
     )
-    if with_by_type:
-        m.by_type["exact"]    = RAGAggregatedMetrics(10, 1, _stats(0.85), _stats(0.75), _stats(0.65))
-        m.by_type["semantic"] = RAGAggregatedMetrics(10, 1, _stats(0.75), _stats(0.65), _stats(0.55))
-    return m
 
 
-def _judgement(case_id: str = "exact_0001") -> RAGJudgement:
+def _judgement(query_id: str = "query_0001") -> RAGJudgement:
     dim = lambda d: DimensionScore.from_raw(4, "ok", d)
     return RAGJudgement(
-        case_id=case_id,
-        case_type="exact",
+        query_id=query_id,
         query="What is attention?",
         answer="Attention allows focus.",
         faithfulness=dim("faithfulness"),
         answer_relevance=dim("answer_relevance"),
-        context_relevance=dim("context_relevance"),
     )
 
 
@@ -67,33 +61,26 @@ class TestFormatSummary:
         text = format_summary(_metrics(), pipeline_name="TestPipeline")
         assert "TestPipeline" in text
 
-    def test_contains_dimension_labels(self):
+    def test_contains_faithfulness_label(self):
         text = format_summary(_metrics())
         assert "Faithfulness" in text
+
+    def test_contains_answer_relevance_label(self):
+        text = format_summary(_metrics())
         assert "Relevance" in text
 
     def test_contains_percentage(self):
-        text = format_summary(_metrics())
-        assert "%" in text
-
-    def test_contains_exact_section(self):
-        text = format_summary(_metrics(with_by_type=True))
-        assert "Exact" in text
-
-    def test_contains_semantic_section(self):
-        text = format_summary(_metrics(with_by_type=True))
-        assert "Semantic" in text
+        assert "%" in format_summary(_metrics())
 
     def test_error_count_shown(self):
-        text = format_summary(_metrics())
-        assert "2" in text   # n_errors = 2
+        assert "2" in format_summary(_metrics())   # n_errors = 2
 
 
 # ---------------------------------------------------------------------------
-# Tests — save_json / load_json
+# Tests — save_json
 # ---------------------------------------------------------------------------
 
-class TestSaveLoadJson:
+class TestSaveJson:
     def test_file_created(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "sub" / "rag_report.json"
@@ -106,7 +93,7 @@ class TestSaveLoadJson:
             save_json(_metrics(), path=p)
             payload = json.loads(p.read_text())
             for key in ("generated_at", "n_total", "n_errors",
-                        "faithfulness", "answer_relevance", "context_relevance"):
+                        "faithfulness", "answer_relevance"):
                 assert key in payload
 
     def test_pipeline_name_stored(self):
@@ -120,12 +107,6 @@ class TestSaveLoadJson:
             p = Path(td) / "r.json"
             save_json(_metrics(), path=p, extra={"dataset_path": "/data/ds.json"})
             assert json.loads(p.read_text())["dataset_path"] == "/data/ds.json"
-
-    def test_load_json_returns_dict(self):
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "r.json"
-            save_json(_metrics(), path=p)
-            assert isinstance(load_json(p), dict)
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +123,7 @@ class TestSaveJudgements:
     def test_json_structure(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "j.json"
-            save_judgements([_judgement("e1"), _judgement("e2")], path=p)
+            save_judgements([_judgement("q1"), _judgement("q2")], path=p)
             payload = json.loads(p.read_text())
             assert payload["n_judgements"] == 2
             assert len(payload["judgements"]) == 2
@@ -150,9 +131,9 @@ class TestSaveJudgements:
     def test_judgement_fields_serialized(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "j.json"
-            save_judgements([_judgement("exact_0001")], path=p)
+            save_judgements([_judgement("query_0001")], path=p)
             j = json.loads(p.read_text())["judgements"][0]
-            assert j["case_id"] == "exact_0001"
+            assert j["query_id"] == "query_0001"
             assert "faithfulness" in j
             assert "answer_relevance" in j
 

@@ -19,7 +19,7 @@ class RetrievalResult:
     chunk_index: int
     text: str
     score: float
-    score_type: str = "bm25"  # bm25 | cosine | l2 | rrf | rerank
+    score_type: str = "tfidf"  # tfidf | cosine_lsi | cosine | l2 | rrf | rerank
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

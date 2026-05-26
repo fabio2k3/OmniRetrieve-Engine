@@ -16,7 +16,11 @@ Módulo indexing (índice invertido)
     index_meta  — almacén clave/valor para auditoría de la indexación
 
 Módulo retrieval (LSI)
-    lsi_log     — registro de cada construcción del modelo LSI
+    lsi_log             — registro de cada construcción del modelo LSI
+
+Módulo búsqueda web
+    web_search_results  — resultados de búsquedas web (DuckDuckGo/Tavily)
+    web_search_log      — auditoría: cuántos resultados por búsqueda
 """
 
 from __future__ import annotations
@@ -123,6 +127,19 @@ CREATE TABLE IF NOT EXISTS web_search_log (
     results_found  INTEGER DEFAULT 0,
     results_saved  INTEGER DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS web_search_results (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    searched_at TEXT    NOT NULL,
+    query       TEXT    NOT NULL,
+    title       TEXT,
+    url         TEXT    NOT NULL,
+    content     TEXT,
+    score       REAL    DEFAULT 0.5,
+    source      TEXT    DEFAULT 'web'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_web_results_url ON web_search_results(url);
 
 -- ── Índices ─────────────────────────────────────────────────────────────────
 

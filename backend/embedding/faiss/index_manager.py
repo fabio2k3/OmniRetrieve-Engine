@@ -35,10 +35,7 @@ from typing import Optional
 
 import numpy as np
 
-from .constants import (
-    DEFAULT_NLIST, DEFAULT_M, DEFAULT_NBITS,
-    DEFAULT_NPROBE, DEFAULT_REBUILD_EVERY,
-)
+from .constants import MIN_TRAIN_FACTOR  # noqa: F401 (used via builder)
 from . import builder as _builder
 
 log = logging.getLogger(__name__)
@@ -63,11 +60,11 @@ class FaissIndexManager:
     def __init__(
         self,
         dim:           int,
-        nlist:         int  = DEFAULT_NLIST,
-        m:             int  = DEFAULT_M,
-        nbits:         int  = DEFAULT_NBITS,
-        nprobe:        int  = DEFAULT_NPROBE,
-        rebuild_every: int  = DEFAULT_REBUILD_EVERY,
+        nlist:         int  = 100,
+        m:             int  = 8,
+        nbits:         int  = 8,
+        nprobe:        int  = 10,
+        rebuild_every: int  = 10_000,
         index_path:    Optional[Path] = None,
         id_map_path:   Optional[Path] = None,
     ) -> None:

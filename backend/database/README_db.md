@@ -1,12 +1,9 @@
----
-noteId: "7c435820296511f1b0a22758fc0c48d3"
-tags: []
+# OmniRetrieve — Módulo `database`
 
----
-
-# OmniRetrieve — Módulo de Base de Datos
-
-Esquema SQLite unificado y repositorios de acceso a datos para todos los módulos del sistema. Es la única capa que toca la base de datos directamente — el resto de módulos accede siempre a través de las funciones de este módulo.
+Capa de acceso a datos. Una única base de datos **SQLite** con modo WAL
+comparte estado entre todos los módulos del sistema. El módulo expone un
+repositorio por cada dominio funcional; ningún otro módulo ejecuta SQL
+directamente.
 
 ---
 
@@ -14,268 +11,328 @@ Esquema SQLite unificado y repositorios de acceso a datos para todos los módulo
 
 ```
 backend/database/
-├── schema.py               <- DDL completo + get_connection() + init_db()
-├── crawler_repository.py   <- operaciones de documentos y crawl_log
-├── chunk_repository.py     <- operaciones sobre la tabla chunks
-├── index_repository.py     <- operaciones del indexador TF
-├── embedding_repository.py <- tablas faiss_log y embedding_meta
-└── __init__.py             <- exports públicos de todo el módulo
+├── schema.py              ← DDL unificado, init_db(), get_connection()
+├── crawler_repository.py  ← documentos: metadatos, texto PDF, estado, crawl_log
+├── chunk_repository.py    ← chunks: texto, embeddings (BLOB), iteradores
+├── index_repository.py    ← índice TF: terms, postings, index_meta, lsi_log
+├── embedding_repository.py← FAISS: faiss_log, embedding_meta (schema adicional)
+├── web_repository.py      ← búsqueda web: web_search_results, web_search_log
+└── __init__.py            ← exports públicos
 ```
 
 ---
 
-## Tablas
+## Configuración SQLite
 
-### Módulo crawler
+```python
+PRAGMA journal_mode = WAL;   # escrituras concurrentes sin bloquear lecturas
+PRAGMA foreign_keys = ON;    # integridad referencial (CASCADE en chunks, postings)
+```
 
-| Tabla | Repositorio | Descripción |
-|---|---|---|
-| `documents` | `crawler_repository` | Metadatos de cada artículo + texto extraído del PDF |
-| `chunks` | `chunk_repository` | Fragmentos de texto con sus embeddings |
-| `crawl_log` | `crawler_repository` | Registro de cada ejecución del crawler |
+Todas las conexiones usan `row_factory = sqlite3.Row`: las filas se acceden
+tanto por índice (`row[0]`) como por nombre de columna (`row["title"]`).
 
-### Módulo indexing
-
-| Tabla | Repositorio | Descripción |
-|---|---|---|
-| `terms` | `index_repository` | Vocabulario: una fila por token único con su `df` |
-| `postings` | `index_repository` | Índice invertido: frecuencia cruda (`freq`) por par (término, documento) |
-| `index_meta` | `index_repository` | Almacén clave/valor para auditoría del indexador |
-
-### Módulo retrieval
-
-| Tabla | Repositorio | Descripción |
-|---|---|---|
-| `lsi_log` | — | Registro de cada construcción del modelo LSI |
-
-### Módulo embedding
-
-| Tabla | Repositorio | Descripción |
-|---|---|---|
-| `faiss_log` | `embedding_repository` | Historial de cada reconstrucción del índice FAISS |
-| `embedding_meta` | `embedding_repository` | Metadatos clave/valor del pipeline de embedding |
+Ruta por defecto: `backend/data/db/documents.db`.
 
 ---
 
-## Schema
+## Esquema de tablas
 
-### `documents`
+### Módulo `crawler`
 
-```sql
-CREATE TABLE documents (
-    arxiv_id         TEXT PRIMARY KEY,
-    title            TEXT NOT NULL,
-    authors          TEXT,
-    abstract         TEXT,
-    categories       TEXT,
-    published        TEXT,
-    updated          TEXT,
-    pdf_url          TEXT,
-    fetched_at       TEXT,          -- timestamp de descarga de metadatos
-    full_text        TEXT,          -- texto completo extraido del PDF/HTML
-    text_length      INTEGER,
-    pdf_downloaded   INTEGER NOT NULL DEFAULT 0,
-    --   0 = pendiente de descarga
-    --   1 = descargado con exito
-    --   2 = error en descarga/extraccion
-    indexed_at       TEXT,          -- timestamp de extraccion del PDF (crawler)
-    index_error      TEXT,          -- mensaje de error si pdf_downloaded = 2
-    indexed_tfidf_at TEXT           -- timestamp de indexacion TF; NULL = pendiente
-);
-```
+#### `documents`
 
-### `chunks`
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `arxiv_id` | TEXT PK | ID compuesto: `"arxiv:2301.12345"` |
+| `title`, `authors`, `abstract`, `categories` | TEXT | Metadatos del artículo |
+| `published`, `updated`, `pdf_url`, `fetched_at` | TEXT | Fechas ISO-8601 y URL |
+| `full_text` | TEXT | Texto completo extraído (NULL hasta la descarga) |
+| `text_length` | INTEGER | Caracteres de `full_text` |
+| `pdf_downloaded` | INTEGER | **0** = pendiente · **1** = descargado · **2** = error |
+| `indexed_at` | TEXT | Timestamp de extracción del PDF |
+| `index_error` | TEXT | Mensaje de error si `pdf_downloaded = 2` |
+| `indexed_tfidf_at` | TEXT | Timestamp de indexación TF (NULL = pendiente para indexar) |
 
-```sql
-CREATE TABLE chunks (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    arxiv_id    TEXT    NOT NULL REFERENCES documents(arxiv_id) ON DELETE CASCADE,
-    chunk_index INTEGER NOT NULL,
-    text        TEXT    NOT NULL,
-    char_count  INTEGER,
-    embedding   BLOB,               -- vector float32 serializado; NULL = pendiente
-    embedded_at TEXT,               -- timestamp de embedding; NULL = pendiente
-    created_at  TEXT    NOT NULL,
-    UNIQUE(arxiv_id, chunk_index)
-);
-```
+Índices: `categories`, `published`, `pdf_downloaded`.
 
-### `postings`
+#### `chunks`
 
-```sql
-CREATE TABLE postings (
-    term_id  INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,
-    doc_id   TEXT    NOT NULL REFERENCES documents(arxiv_id) ON DELETE CASCADE,
-    freq     INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (term_id, doc_id)
-);
-```
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `id` | INTEGER PK AUTOINCREMENT | Referenciado por el índice FAISS |
+| `arxiv_id` | TEXT FK → documents | Cascade delete |
+| `chunk_index` | INTEGER | Posición secuencial en el documento (0-based) |
+| `text` | TEXT | Texto del chunk |
+| `char_count` | INTEGER | Longitud del texto |
+| `embedding` | BLOB | `ndarray.astype(float32).tobytes()` (NULL hasta el embedding) |
+| `embedded_at` | TEXT | Timestamp del embedding |
+| `created_at` | TEXT | Timestamp de creación |
 
-`postings` guarda solo frecuencias crudas (`freq`). Los pesos TF-IDF se calculan en el módulo `retrieval`.
+Constraint `UNIQUE(arxiv_id, chunk_index)`. Índices: `arxiv_id`, `embedded_at`.
 
-### `faiss_log`
+#### `crawl_log`
 
-```sql
-CREATE TABLE faiss_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    built_at    TEXT    NOT NULL,
-    n_vectors   INTEGER NOT NULL,
-    index_type  TEXT    NOT NULL,   -- 'IndexIVFPQ' | 'IndexFlatL2'
-    model_name  TEXT,
-    nlist       INTEGER,
-    m           INTEGER,
-    nbits       INTEGER,
-    index_path  TEXT,
-    id_map_path TEXT,
-    notes       TEXT
-);
-```
+Una fila por ejecución del crawler con `started_at`, `finished_at`,
+`ids_discovered`, `docs_downloaded`, `pdfs_indexed`, `errors`, `notes`.
 
 ---
 
-## Repositorios
+### Módulo `indexing` (índice TF)
 
-### `crawler_repository.py`
+#### `terms`
 
-Operaciones sobre documentos y el log del crawler.
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `term_id` | INTEGER PK AUTOINCREMENT | ID interno del término |
+| `word` | TEXT UNIQUE | Token normalizado |
+| `df` | INTEGER | Nº de documentos que contienen el término |
+
+Índice en `word`.
+
+#### `postings`
+
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `term_id` | INTEGER FK → terms (CASCADE) | |
+| `doc_id` | TEXT FK → documents (CASCADE) | |
+| `freq` | INTEGER | Frecuencia cruda del término en el documento |
+
+PK compuesta `(term_id, doc_id)`. Índices: `doc_id`, `term_id`.
+
+#### `index_meta`
+
+Almacén clave/valor (`key` PK, `value`) para auditoría de la indexación:
+número de documentos, términos, fecha del último run, etc.
+
+---
+
+### Módulo `retrieval` (LSI)
+
+#### `lsi_log`
+
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `built_at` | TEXT | Timestamp de construcción del modelo |
+| `k` | INTEGER | Componentes latentes |
+| `n_docs` | INTEGER | Documentos en el modelo |
+| `n_terms` | INTEGER | Términos en el vocabulario |
+| `var_explained` | REAL | Varianza explicada por el SVD |
+| `model_path` | TEXT | Ruta al `.pkl` serializado |
+| `notes` | TEXT | Notas opcionales |
+
+---
+
+### Módulo `embedding` (FAISS)
+
+Estas tablas se crean con `init_embedding_schema()`, **no** con `init_db()`.
+
+#### `faiss_log`
+
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `built_at` | TEXT | Timestamp de construcción del índice |
+| `n_vectors` | INTEGER | Vectores en el índice |
+| `index_type` | TEXT | `"IndexFlatL2"` o `"IndexIVFPQ"` |
+| `model_name` | TEXT | Nombre del modelo sentence-transformers |
+| `nlist`, `m`, `nbits` | INTEGER | Parámetros IVFPQ |
+| `index_path`, `id_map_path` | TEXT | Rutas a los ficheros `.faiss` y `.npy` |
+
+#### `embedding_meta`
+
+Almacén clave/valor (`key` PK, `value`) para metadatos del pipeline de
+embedding: nombre del modelo, timestamp del último run, etc.
+
+---
+
+### Módulo `web_search`
+
+#### `web_search_results`
+
+| Columna | Tipo | Descripción |
+|---|---|---|
+| `url` | TEXT UNIQUE | URL de la página (constraint de deduplicación) |
+| `searched_at`, `query` | TEXT | Cuándo y con qué query se encontró |
+| `title`, `content` | TEXT | Título y texto de la página |
+| `score` | REAL | Score asignado por Tavily/SiteSearcher |
+| `source` | TEXT | `"web"` (Tavily) o `"web_search"` (SiteSearcher) |
+
+#### `web_search_log`
+
+Una fila por llamada a `WebSearchPipeline.run()` con `query`,
+`results_found` y `results_saved`.
+
+---
+
+## `schema.py` — API de inicialización
+
+```python
+from backend.database.schema import init_db, get_connection, DB_PATH
+
+init_db()                          # crea tablas e índices si no existen (idempotente)
+init_db(Path("/custom/path.db"))   # BD alternativa
+
+conn = get_connection()            # sqlite3.Connection con row_factory=sqlite3.Row
+```
+
+`init_db()` ejecuta el DDL completo en una sola llamada a `executescript()`.
+Es idempotente: todas las sentencias usan `CREATE TABLE IF NOT EXISTS`.
+
+---
+
+## `crawler_repository.py`
+
+Consumido por: **Crawler** (`DownloaderLoop`, `TextLoop`), **orchestrator**.
 
 | Función | Descripción |
 |---|---|
-| `upsert_document(...)` | Inserta o actualiza metadatos de un artículo |
-| `save_pdf_text(arxiv_id, full_text)` | Persiste el texto extraído y marca `pdf_downloaded=1` |
-| `save_pdf_error(arxiv_id, error)` | Registra un fallo y marca `pdf_downloaded=2` |
-| `get_pending_pdf_ids(limit)` | IDs de documentos con `pdf_downloaded=0` |
-| `document_exists(arxiv_id)` | Comprueba si un documento está en la BD |
-| `get_document(arxiv_id)` | Devuelve la fila completa de un documento |
-| `log_crawl_start()` | Abre una entrada en `crawl_log`, devuelve su id |
-| `log_crawl_end(log_id, ...)` | Cierra la entrada con estadísticas |
-| `get_stats()` | Resumen del estado de documentos y chunks |
+| `upsert_document(arxiv_id, title, …)` | INSERT OR UPDATE de metadatos; no toca `full_text` ni estado PDF |
+| `save_pdf_text(arxiv_id, full_text)` | Guarda texto y pone `pdf_downloaded=1`, `indexed_at=now` |
+| `save_pdf_error(arxiv_id, error)` | Registra fallo: `pdf_downloaded=2`, `index_error=msg` |
+| `get_pending_pdf_ids(limit)` | IDs con `pdf_downloaded=0`, ordenados por fecha desc |
+| `get_document(arxiv_id)` | `sqlite3.Row` completa o `None` |
+| `document_exists(arxiv_id)` | `bool` rápido sin leer todos los campos |
+| `log_crawl_start()` | Inserta en `crawl_log`, devuelve el `id` |
+| `log_crawl_end(log_id, …)` | Actualiza la fila con contadores y `finished_at` |
+| `get_stats()` | `{total_documents, pdf_indexed, pdf_pending, pdf_errors, total_chunks, …}` |
+| `get_document_counts()` | `{total, indexed, pending}` — versión ligera para el orchestrator |
+| `get_unindexed_pdf_count()` | Docs con `pdf_downloaded=1` e `indexed_tfidf_at IS NULL` |
 
-### `chunk_repository.py`
+---
 
-Todas las operaciones sobre la tabla `chunks`. Repositorio canónico para esta tabla — ningún otro módulo escribe SQL sobre `chunks` directamente.
+## `chunk_repository.py`
+
+Consumido por: **Crawler** (save), **Embedding** (lectura/escritura de embeddings),
+**QRF** (get_embeddings), **LSIRetriever** (get_chunks_with_metadata).
 
 | Función | Descripción |
 |---|---|
-| `save_chunks(arxiv_id, texts)` | Reemplaza los chunks de un documento |
-| `get_chunks(arxiv_id)` | Todos los chunks de un documento ordenados por índice |
-| `save_chunk_embedding(chunk_id, embedding)` | Persiste un embedding individual |
-| `save_chunk_embeddings_batch(batch)` | Persiste un lote de `(bytes, timestamp, chunk_id)` |
-| `reset_embeddings()` | Pone a NULL todos los embeddings (para re-embedidar) |
-| `get_unembedded_chunks(limit)` | Lista de chunks sin embedding |
-| `get_unembedded_chunks_iter(batch_size)` | Generador de chunks sin embedding por lotes |
-| `get_all_embeddings_iter(batch_size)` | Generador de `(id, embedding)` para reconstruir FAISS |
+| `save_chunks(arxiv_id, texts)` | DELETE previos + INSERT con `chunk_index` secuencial |
+| `save_chunk_embedding(chunk_id, embedding_bytes)` | Actualiza un chunk individual |
+| `save_chunk_embeddings_batch([(bytes, ts, id), …])` | Batch UPDATE; devuelve nº de filas |
+| `reset_embeddings()` | Pone `embedding=NULL` en todos los chunks; devuelve nº de filas |
+| `get_chunks(arxiv_id)` | Todos los chunks de un documento, ordenados por `chunk_index` |
+| `get_unembedded_chunks(limit)` | Chunks con `embedded_at IS NULL` |
+| `get_unembedded_chunks_iter(batch_size)` | Generador por lotes (para pipelines de embedding) |
+| `get_all_embeddings_iter(batch_size)` | Generador: solo chunks con `embedding IS NOT NULL` |
+| `get_chunks_by_ids(ids)` | Chunks por lista de `id`; chunked queries (límite 900 vars) |
 | `get_chunk_count()` | Total de chunks en la tabla |
-| `get_embedded_count()` | Chunks con embedding almacenado |
-| `get_chunk_stats()` | Resumen `{total, embedded, pending}` |
-
-### `index_repository.py`
-
-Operaciones del módulo de indexación y del módulo de recuperación.
-
-| Función | Descripción |
-|---|---|
-| `clear_index()` | Borra `terms` y `postings` (para reindex completo) |
-| `upsert_terms(df_map)` | Inserta términos nuevos y acumula `df` de existentes |
-| `flush_postings(batch)` | Inserta o actualiza un lote de `(term_id, doc_id, freq)` |
-| `mark_documents_indexed(arxiv_ids)` | Pone `indexed_tfidf_at = now` en los documentos indexados |
-| `save_index_meta(stats)` | Persiste metadatos de auditoría en `index_meta` |
-| `get_unindexed_documents(field, ...)` | Generador de docs con PDF descargado e `indexed_tfidf_at IS NULL` |
-| `get_index_stats()` | vocab_size, total_docs, total_postings, meta |
-| `get_top_terms(arxiv_id, n)` | Top N términos por frecuencia de un documento |
-| `get_postings_for_term(word)` | Posting list de un término: `[{doc_id, freq}]` |
-| `get_postings_for_matrix(max_docs)` | Datos crudos para construir la matriz TF-IDF en retrieval |
-| `get_document_metadata(arxiv_ids)` | Metadatos de documentos para mostrar en resultados |
-
-### `embedding_repository.py`
-
-Operaciones sobre las tablas propias del módulo de embedding.
-
-| Función | Descripción |
-|---|---|
-| `init_embedding_schema()` | Crea `faiss_log` y `embedding_meta` si no existen |
-| `log_faiss_build(stats)` | Registra una reconstrucción del índice en `faiss_log` |
-| `save_embedding_meta(key, value)` | Persiste o actualiza un par clave/valor |
-| `get_embedding_meta(key)` | Recupera un valor de `embedding_meta` |
-| `get_embedding_stats()` | Resumen combinado: chunks + último build FAISS |
+| `get_embedded_count()` | Chunks con `embedded_at IS NOT NULL` |
+| `get_chunk_stats()` | `{total_chunks, embedded_chunks, pending_chunks}` |
+| `get_chunks_with_metadata_by_arxiv_ids(ids)` | Chunks + título del documento (para LSIRetriever) |
+| `get_chunk_embeddings_by_ids(ids)` | `{chunk_id: ndarray}` (para BRF y MMR del módulo qrf) |
 
 ---
 
-## Uso
+## `index_repository.py`
 
-### Inicializar la BD
+Consumido por: **Indexing** (escritura), **LSI model** (lectura de matriz y términos).
+
+| Función | Descripción |
+|---|---|
+| `clear_index()` | Elimina todos los registros de `terms` y `postings` |
+| `upsert_terms(df_map)` | INSERT de términos nuevos + acumulación de `df` en un batch |
+| `flush_postings(batch)` | INSERT OR IGNORE de `(term_id, doc_id, freq)` en batch |
+| `mark_documents_indexed(doc_ids)` | Escribe `indexed_tfidf_at=now` en los documentos |
+| `get_unindexed_documents(field, batch_size)` | Docs con `pdf_downloaded=1` e `indexed_tfidf_at IS NULL` |
+| `get_index_stats()` | `{vocab_size, total_docs, total_postings, last_indexed_at}` |
+| `get_top_terms(doc_id, n)` | Top-N términos por frecuencia para un documento |
+| `get_postings_for_term(word)` | Documentos que contienen un término |
+| `get_postings_for_matrix()` | Devuelve `(postings, df_map, doc_ids, term_ids, n_docs)` — datos crudos para LSI |
+| `get_term_words_by_ids(term_ids)` | `[(term_id, word)]`; chunked en lotes de 900 |
+| `get_document_metadata(arxiv_ids)` | `{arxiv_id: {title, authors, abstract, pdf_url}}` |
+| `get_indexed_doc_count()` | Docs distintos con postings |
+| `save_index_meta(stats)` | Persiste metadatos del run en `index_meta` |
+| `log_lsi_build(…)` | Inserta en `lsi_log` con `k`, `n_docs`, `var_explained`, etc. |
+
+`get_postings_for_matrix()` devuelve frecuencias crudas (`freq`, `df`).
+La fórmula TF-IDF la aplica el módulo `retrieval`, no este repositorio.
+
+---
+
+## `embedding_repository.py`
+
+Consumido por: **EmbeddingPipeline**.
+
+Requiere llamar a `init_embedding_schema(db_path)` antes del primer uso:
+crea las tablas `faiss_log` y `embedding_meta` si no existen.
+
+| Función | Descripción |
+|---|---|
+| `init_embedding_schema()` | Crea `faiss_log` y `embedding_meta` (idempotente) |
+| `log_faiss_build(stats)` | Inserta fila en `faiss_log` con parámetros del índice |
+| `save_embedding_meta(key, value)` | UPSERT en `embedding_meta` |
+| `get_embedding_meta(key)` | Recupera valor por clave, `None` si no existe |
+| `get_embedding_stats()` | `{total_chunks, embedded_chunks, pending_chunks, last_build_at, last_index_type, last_n_vectors}` |
+
+---
+
+## `web_repository.py`
+
+Consumido por: **WebSearchPipeline**.
+
+| Función | Descripción |
+|---|---|
+| `save_web_results(query, results)` | INSERT OR IGNORE en `web_search_results` (dedup por URL); registra en `web_search_log` |
+| `get_cached_result(url)` | Devuelve el contenido cacheado de una URL o `None` |
+| `get_web_results(limit)` | Últimas N filas de `web_search_results` (para monitorización) |
+
+---
+
+## Convenciones de implementación
+
+**Sin ORM.** Todos los repositorios usan SQL directo vía `sqlite3`.
+
+**Patrón de conexión.** Cada función abre y cierra su propia conexión:
 
 ```python
-from backend.database.schema import init_db
-
-init_db()           # crea todas las tablas si no existen (idempotente)
-init_db(db_path)    # ruta personalizada
+conn = get_connection(db_path)
+try:
+    result = conn.execute(sql, params).fetchone()
+    conn.commit()
+    return result
+finally:
+    conn.close()
 ```
 
-### Desde el crawler
+**Chunked queries.** Las consultas con `IN (?, ?, …)` se dividen en lotes
+de 900 para no superar el límite de 999 variables de SQLite.
 
-```python
-from backend.database.crawler_repository import upsert_document, save_pdf_text
-from backend.database.chunk_repository import save_chunks
+**`pdf_downloaded` como máquina de estados.**
 
-upsert_document(arxiv_id="2301.001", title="...", ...)
-save_pdf_text("2301.001", full_text="...")
-save_chunks("2301.001", ["chunk A", "chunk B", "chunk C"])
 ```
-
-### Desde el pipeline de embedding
-
-```python
-from backend.database.chunk_repository import (
-    get_unembedded_chunks_iter,
-    save_chunk_embeddings_batch,
-    get_all_embeddings_iter,
-)
-
-# Leer pendientes
-for batch in get_unembedded_chunks_iter(batch_size=256):
-    ...  # vectorizar y persistir
-
-# Persistir lote
-save_chunk_embeddings_batch([(blob, timestamp, chunk_id), ...])
-
-# Leer todos para reconstruir FAISS
-for batch in get_all_embeddings_iter():
-    for row in batch:
-        vec = np.frombuffer(row["embedding"], dtype=np.float32)
-```
-
-### Desde el indexador
-
-```python
-from backend.database.index_repository import (
-    get_unindexed_documents, upsert_terms,
-    flush_postings, mark_documents_indexed,
-)
-
-for arxiv_id, texto in get_unindexed_documents(field="full_text"):
-    ...  # tokenizar y contar
-
-all_terms = upsert_terms(df_map)
-flush_postings(batch)
-mark_documents_indexed(list(doc_ids))
-```
-
-### Desde retrieval
-
-```python
-from backend.database.index_repository import get_postings_for_matrix
-
-postings, df_map, doc_ids, term_ids, n_docs = get_postings_for_matrix()
-# -> construir matriz TF-IDF y aplicar SVD
+0 (pendiente) ──→ 1 (descargado OK)
+0 (pendiente) ──→ 2 (error de descarga o extracción)
+2 (error)     ──→ 0 (reset para reintentar, vía retry_downloads.py)
 ```
 
 ---
 
-## Diseño
+## Tests
 
-- **Stateless** — cada función abre y cierra su propia conexión. No hay objetos de conexión persistentes.
-- **Idempotente** — todos los inserts usan `INSERT OR IGNORE` o `ON CONFLICT DO UPDATE`. Es seguro llamarlos varias veces con los mismos datos.
-- **Un repositorio por tabla** — cada tabla tiene un repositorio canónico. Solo ese repositorio escribe SQL sobre ella.
-- **Sin pesos calculados** — `postings` guarda solo `freq` (entero). Ninguna función de este módulo calcula TF-IDF; esa responsabilidad pertenece a `retrieval/`.
-- **WAL mode** — todas las conexiones activan `PRAGMA journal_mode = WAL` para permitir lectores concurrentes mientras el crawler escribe.
+Los tests de la capa de BD están integrados en los tests de los módulos
+que consumen cada repositorio.
+
+```bash
+# crawler_repository — via test de integración del crawler
+pytest backend/tests/crawler/test_backward_compat.py -v
+pytest backend/tests/crawler/test_routing.py         -v
+
+# chunk_repository — test dedicado en embedding
+pytest backend/tests/embedding/test_chunk_repository.py     -v
+
+# embedding_repository — test dedicado en embedding
+pytest backend/tests/embedding/test_embedding_repository.py -v
+
+# index_repository — test dedicado en indexing
+pytest backend/tests/indexing/test_index_repository.py      -v
+
+# web_repository — via test_web_search
+pytest backend/tests/test_web_search/test_pipeline.py       -v
+
+# pipeline completo de extremo a extremo
+pytest backend/tests/integration/test_full_pipeline.py      -v
+```
+
+Todos los tests crean su propia BD en `tmp_path` y llaman a `init_db()`
+al inicio. Ningún test depende de datos persistentes en disco.

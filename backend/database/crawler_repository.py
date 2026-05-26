@@ -224,3 +224,47 @@ def get_stats(db_path: Path = DB_PATH) -> dict:
         "pdf_errors":      errors,
         **get_chunk_stats(db_path),
     }
+
+# ---------------------------------------------------------------------------
+# Consultas de estado (usadas por el orquestador y sus hilos)
+# ---------------------------------------------------------------------------
+
+def get_document_counts(db_path: Path = DB_PATH) -> dict[str, int]:
+    """
+    Devuelve el conteo de documentos agrupado por estado de descarga.
+
+    Claves
+    ------
+    total   : total de documentos en la tabla.
+    indexed : documentos con PDF descargado (pdf_downloaded = 1).
+    pending : documentos aún sin PDF (pdf_downloaded = 0).
+    """
+    conn = get_connection(db_path)
+    try:
+        total   = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        indexed = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 1"
+        ).fetchone()[0]
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE pdf_downloaded = 0"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return {"total": total, "indexed": indexed, "pending": pending}
+
+
+def get_unindexed_pdf_count(db_path: Path = DB_PATH) -> int:
+    """
+    Devuelve el número de documentos con PDF descargado pero aún sin
+    indexar en TF-IDF (indexed_tfidf_at IS NULL).
+
+    Usado por el hilo de indexación para decidir si hay trabajo pendiente.
+    """
+    conn = get_connection(db_path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM documents "
+            "WHERE pdf_downloaded = 1 AND indexed_tfidf_at IS NULL"
+        ).fetchone()[0]
+    finally:
+        conn.close()

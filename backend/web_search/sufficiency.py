@@ -9,10 +9,6 @@ Criterio
 Se considera que la información es suficiente si al menos `min_docs`
 documentos superan el umbral de score `threshold`.
 
-Los valores por defecto están calibrados para similitud coseno LSI:
-    threshold = 0.15  — score mínimo aceptable por documento
-    min_docs  = 1     — al menos 1 documento debe superarlo
-
 Estos valores pueden ajustarse en la configuración del orquestador.
 
 Uso
@@ -30,6 +26,13 @@ import logging
 
 log = logging.getLogger(__name__)
 
+
+
+def _get_score(r) -> float:
+    """Extrae el score de un resultado dict o RetrievalResult."""
+    if isinstance(r, dict):
+        return float(r.get("score", 0.0))
+    return float(getattr(r, "score", 0.0))
 
 class SufficiencyChecker:
     """
@@ -64,7 +67,7 @@ class SufficiencyChecker:
             return False
 
         docs_above = sum(
-            1 for r in results if r.get("score", 0.0) >= self.threshold
+            1 for r in results if _get_score(r) >= self.threshold
         )
 
         sufficient = docs_above >= self.min_docs
@@ -87,9 +90,9 @@ class SufficiencyChecker:
             return "No se encontraron documentos en la base de datos local."
 
         docs_above = sum(
-            1 for r in results if r.get("score", 0.0) >= self.threshold
+            1 for r in results if _get_score(r) >= self.threshold
         )
-        best_score = max((r.get("score", 0.0) for r in results), default=0.0)
+        best_score = max((_get_score(r) for r in results), default=0.0)
 
         if docs_above >= self.min_docs:
             return (

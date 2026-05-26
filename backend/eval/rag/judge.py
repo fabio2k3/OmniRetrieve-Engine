@@ -1,21 +1,15 @@
 """
-judge.py
-========
+rag/judge.py
+============
 Juez LLM: envía un prompt al modelo Ollama y parsea la puntuación devuelta.
 
-Responsabilidad única
----------------------
-Comunicarse con Ollama y extraer un DimensionScore del texto de respuesta.
-No conoce las dimensiones de evaluación ni cómo se construyen los prompts.
-
-Protocolo esperado del LLM
----------------------------
-El LLM debe responder con JSON puro (instruido por prompts.py):
-    {"score": <1-5>, "reason": "<texto breve>"}
-
-Si la respuesta no es parseable, se intenta extraer el JSON de un bloque
-de código markdown (```json ... ```).  Si sigue fallando, se devuelve None
-para que el llamador decida cómo manejar el error.
+Cambio respecto a la versión anterior
+--------------------------------------
+Se activa ``format="json"`` en la llamada a Ollama. Esto fuerza al modelo
+a generar JSON válido a nivel de tokens (grammar-constrained decoding),
+eliminando la causa raíz de errores como ``"reason": texto sin comillas``.
+El parseo de fallback se mantiene como red de seguridad para APIs que no
+soporten el parámetro format.
 """
 
 from __future__ import annotations
@@ -28,7 +22,6 @@ from ._types import Dimension, DimensionScore
 
 log = logging.getLogger(__name__)
 
-# Patrón para extraer JSON de bloques markdown ```json ... ``` o ``` ... ```
 _MARKDOWN_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
@@ -36,11 +29,12 @@ def _extract_json(text: str) -> dict | None:
     """
     Intenta parsear JSON de la respuesta del LLM.
 
-    Estrategia
-    ----------
-    1. Parseo directo del texto completo (limpio).
-    2. Extracción de bloque markdown ``` json ``` si el parseo directo falla.
-    3. Búsqueda del primer { … } en el texto como último recurso.
+    Estrategia (orden de intento)
+    -----------------------------
+    1. Parseo directo del texto completo.
+    2. Extracción de bloque markdown ```json … ```.
+    3. Primer objeto { … } encontrado en el texto.
+    4. Reparación básica: añadir comillas al valor de 'reason' si falta.
     """
     text = text.strip()
 
@@ -62,10 +56,20 @@ def _extract_json(text: str) -> dict | None:
     brace_start = text.find("{")
     brace_end   = text.rfind("}")
     if brace_start != -1 and brace_end > brace_start:
+        fragment = text[brace_start : brace_end + 1]
         try:
-            return json.loads(text[brace_start : brace_end + 1])
+            return json.loads(fragment)
         except json.JSONDecodeError:
-            pass
+            # Intento 4: reparar "reason": texto sin comillas
+            repaired = re.sub(
+                r'"reason"\s*:\s*([^",\}][^,\}]*)',
+                lambda m: f'"reason": "{m.group(1).strip()}"',
+                fragment,
+            )
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
 
     return None
 
@@ -100,12 +104,7 @@ class OllamaJudge:
         raw_text = self._call_ollama(prompt)
         if raw_text is None:
             return None
-
         return self._parse_score(raw_text, dimension)
-
-    # ------------------------------------------------------------------
-    # Internos
-    # ------------------------------------------------------------------
 
     def _call_ollama(self, prompt: str) -> str | None:
         try:
@@ -118,24 +117,37 @@ class OllamaJudge:
             resp = ollama.chat(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
+                format="json",      # ← grammar-constrained JSON output
                 options={"temperature": self.temperature},
             )
             return resp["message"]["content"]
         except Exception as exc:
-            log.error("[judge] Error en llamada Ollama: %s", exc)
-            return None
+            # Algunos clientes Ollama antiguos no soportan format="json"
+            # → reintentar sin él como fallback
+            log.warning(
+                "[judge] format='json' no soportado (%s), reintentando sin él.", exc
+            )
+            try:
+                resp = ollama.chat(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    options={"temperature": self.temperature},
+                )
+                return resp["message"]["content"]
+            except Exception as exc2:
+                log.error("[judge] Error en llamada Ollama: %s", exc2)
+                return None
 
     def _parse_score(self, text: str, dimension: Dimension) -> DimensionScore | None:
         payload = _extract_json(text)
         if payload is None:
-            log.warning("[judge] No se pudo parsear JSON de respuesta: %r…", text[:120])
+            log.warning("[judge] No se pudo parsear JSON: %r…", text[:120])
             return None
 
         raw_score = payload.get("score")
         reason    = payload.get("reason", "")
 
         if not isinstance(raw_score, int):
-            # Algunos modelos devuelven el score como string
             try:
                 raw_score = int(raw_score)
             except (TypeError, ValueError):

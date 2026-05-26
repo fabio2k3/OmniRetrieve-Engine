@@ -9,7 +9,7 @@ el texto de su fuente, y luego el Crawler lo fragmenta aquí.
 
 API pública
 -----------
-make_chunks(text, chunk_size, overlap_sentences) -> List[str]
+make_chunks(text, chunk_size, overlap_sentences, min_chunk_chars, min_sent_chars) -> List[str]
     Punto de entrada único.  Aplica limpieza + fragmentación.
 
 clean_text(text) -> str
@@ -21,18 +21,12 @@ from __future__ import annotations
 import re
 from typing import List
 
-# ---------------------------------------------------------------------------
-# Constantes
-# ---------------------------------------------------------------------------
-MIN_CHUNK_CHARS = 100   # chunks más cortos se descartan
-MIN_SENT_CHARS  = 20    # oraciones muy cortas se fusionan con la siguiente
-
 # Separador de oraciones respetando texto científico:
 #   · Punto seguido de mayúscula o dígito (evita "Fig. 3", "et al.")
 #   · !? siempre separan
 #   · ; como frontera blanda
 _SENT_RE = re.compile(
-    r'(?<=[.!?])\s+(?=[A-Z\"\'\(0-9])'
+    r'(?<=[.!?])\s+(?=[A-Z\"\'\\(0-9])'
     r'|(?<=;)\s+'
 )
 
@@ -59,19 +53,28 @@ def clean_text(text: str) -> str:
 # División en oraciones
 # ---------------------------------------------------------------------------
 
-def _split_sentences(text: str) -> List[str]:
+def _split_sentences(
+    text: str,
+    min_sent_chars: int = 20,
+) -> List[str]:
     """
     Divide un bloque de texto en oraciones usando fronteras lingüísticas.
 
-    Fusiona oraciones muy cortas (< MIN_SENT_CHARS) con la siguiente
+    Fusiona oraciones muy cortas (< min_sent_chars) con la siguiente
     para evitar chunks de una sola palabra o abreviatura suelta.
+
+    Parámetros
+    ----------
+    text           : bloque de texto a dividir.
+    min_sent_chars : longitud mínima de oración antes de fusionar con la
+                     siguiente. Configurable vía cfg.chunk_min_sent_chars.
     """
     raw = [s.strip() for s in _SENT_RE.split(text) if s.strip()]
     merged: List[str] = []
     buf = ""
     for sent in raw:
         buf = (buf + " " + sent).strip() if buf else sent
-        if len(buf) >= MIN_SENT_CHARS:
+        if len(buf) >= min_sent_chars:
             merged.append(buf)
             buf = ""
     if buf:
@@ -90,6 +93,8 @@ def _split_into_chunks(
     text: str,
     max_chars: int = 1000,
     overlap_sentences: int = 2,
+    min_chunk_chars: int = 100,
+    min_sent_chars: int = 20,
 ) -> List[str]:
     """
     Divide el texto en chunks con solapamiento semántico a nivel de oración.
@@ -108,6 +113,10 @@ def _split_into_chunks(
     max_chars          : tamaño máximo de cada chunk en caracteres.
     overlap_sentences  : oraciones compartidas entre chunks consecutivos
                          dentro del mismo párrafo. 0 = sin solapamiento.
+    min_chunk_chars    : longitud mínima para emitir un chunk; los más
+                         cortos se descartan. Configurable vía cfg.chunk_min_chars.
+    min_sent_chars     : longitud mínima de oración antes de fusionarla.
+                         Configurable vía cfg.chunk_min_sent_chars.
 
     Ejemplo con overlap_sentences=2
     --------------------------------
@@ -120,7 +129,7 @@ def _split_into_chunks(
     chunks: List[str] = []
 
     for para in paragraphs:
-        sentences = _split_sentences(para)
+        sentences = _split_sentences(para, min_sent_chars=min_sent_chars)
         if not sentences:
             continue
 
@@ -133,7 +142,7 @@ def _split_into_chunks(
             if window and window_len + sent_len > max_chars:
                 # Emitir chunk actual
                 candidate = " ".join(window)
-                if len(candidate) >= MIN_CHUNK_CHARS:
+                if len(candidate) >= min_chunk_chars:
                     chunks.append(candidate)
 
                 # Solapamiento: conservar las últimas N oraciones
@@ -150,7 +159,7 @@ def _split_into_chunks(
         # Emitir el último chunk del párrafo
         if window:
             candidate = " ".join(window)
-            if len(candidate) >= MIN_CHUNK_CHARS:
+            if len(candidate) >= min_chunk_chars:
                 chunks.append(candidate)
 
     return chunks
@@ -164,6 +173,8 @@ def make_chunks(
     text: str,
     chunk_size: int = 1000,
     overlap_sentences: int = 2,
+    min_chunk_chars: int = 100,
+    min_sent_chars: int = 20,
 ) -> List[str]:
     """
     Punto de entrada único del módulo.
@@ -177,6 +188,12 @@ def make_chunks(
     chunk_size         : tamaño máximo de cada chunk en caracteres.
     overlap_sentences  : oraciones de contexto compartidas entre chunks
                          consecutivos del mismo párrafo.
+    min_chunk_chars    : longitud mínima para emitir un chunk; los más
+                         cortos se descartan. Por defecto 100.
+                         Pasar cfg.chunk_min_chars para hacerlo configurable.
+    min_sent_chars     : longitud mínima de oración antes de fusionarla
+                         con la siguiente. Por defecto 20.
+                         Pasar cfg.chunk_min_sent_chars para hacerlo configurable.
 
     Returns
     -------
@@ -188,4 +205,6 @@ def make_chunks(
         cleaned,
         max_chars=chunk_size,
         overlap_sentences=overlap_sentences,
+        min_chunk_chars=min_chunk_chars,
+        min_sent_chars=min_sent_chars,
     )

@@ -1,349 +1,289 @@
----
-noteId: "5f27afa03c2c11f19f111fe4db9ea2b5"
-tags: []
+# OmniRetrieve — Módulo `embedding`
+
+Vectoriza los chunks de texto con `sentence-transformers` y gestiona el
+índice vectorial FAISS para búsqueda semántica densa. El módulo coordina
+cuatro responsabilidades bien separadas: vectorización (`embedder.py`),
+procesamiento por lotes (`_batch.py`), sincronización con la BD (`_sync.py`)
+y registro de metadatos (`_meta.py`).
 
 ---
 
-# Módulo `embedding` — Documentación completa
-
-## Índice
-
-1. [Visión general](#1-visión-general)
-2. [Estructura de ficheros](#2-estructura-de-ficheros)
-3. [Flujo completo de trabajo](#3-flujo-completo-de-trabajo)
-4. [Módulos — referencia detallada](#4-módulos--referencia-detallada)
-   - [embedder.py](#41-embedderpy)
-   - [pipeline.py](#42-pipelinepy)
-   - [_sync.py](#43-_syncpy)
-   - [_batch.py](#44-_batchpy)
-   - [_meta.py](#45-_metapy)
-   - [main.py](#46-mainpy)
-   - [faiss/constants.py](#47-faissconstantspy)
-   - [faiss/builder.py](#48-faissbuildepy)
-   - [faiss/index_manager.py](#49-faissindex_managerpy)
-5. [Librerías utilizadas](#5-librerías-utilizadas)
-6. [Referencia de argumentos CLI](#6-referencia-de-argumentos-cli)
-
----
-
-## 1. Visión general
-
-El módulo `embedding` transforma texto en vectores densos y los indexa en FAISS para permitir búsqueda semántica eficiente sobre el corpus.
+## Estructura de archivos
 
 ```
-BD SQLite (chunks sin embedding)
-         │
-         ▼
-  [ChunkEmbedder]          ← sentence-transformers
-  encode(texts) → (N, dim) float32
-         │
-         ▼
-  [_batch.process_batch]
-  ├── save_chunk_embeddings_batch() → BD (embedding serializado)
-  └── FaissIndexManager.add()      → índice en memoria
-         │
-         ▼ (cada rebuild_every chunks)
-  [FaissIndexManager.rebuild]
-  ├── builder.build_ivfpq()  → IndexIVFPQ entrenado
-  └── save()                 → disco (.faiss + .npy)
+backend/embedding/
+├── pipeline.py        ← EmbeddingPipeline: orquestador principal (8 pasos)
+├── embedder.py        ← ChunkEmbedder: wrapper de sentence-transformers
+├── _batch.py          ← process_batch(): vectoriza un lote y persiste en BD + FAISS
+├── _sync.py           ← check_and_sync(): detecta y corrige desincronizaciones
+├── _meta.py           ← log_faiss_build(), save_run_meta(), print_stats()
+├── main.py            ← entrypoint CLI (alias de embed_chunks tool)
+├── faiss/
+│   ├── __init__.py    ← exporta FaissIndexManager
+│   ├── index_manager.py ← FaissIndexManager: ciclo de vida completo del índice
+│   ├── builder.py     ← build_flat(), build_ivfpq(), min_train_size(), effective_nlist()
+│   └── constants.py   ← MIN_TRAIN_FACTOR = 39 (heurística de entrenamiento FAISS)
+└── __init__.py        ← exports públicos: EmbeddingPipeline, ChunkEmbedder, FaissIndexManager
 ```
 
 ---
 
-## 2. Estructura de ficheros
+## Instalación
 
-```
-embedding/
-│
-├── __init__.py        Exports públicos del paquete.
-├── embedder.py        ChunkEmbedder — wrapper sobre sentence-transformers.
-├── pipeline.py        EmbeddingPipeline — coordinador del flujo completo.
-├── _sync.py           Sincronización FAISS-BD y reset de embeddings (interno).
-├── _batch.py          Procesamiento de lotes: vectorizar + persistir (interno).
-├── _meta.py           Registro de metadatos y presentación de stats (interno).
-├── main.py            Entrypoint CLI (argparse + main).
-│
-└── faiss/
-    ├── __init__.py
-    ├── constants.py   Constantes y parámetros por defecto del índice.
-    ├── builder.py     Construcción de índices: build_flat, build_ivfpq.
-    └── index_manager.py  FaissIndexManager — gestión, búsqueda y persistencia.
+```bash
+pip install sentence-transformers faiss-cpu numpy
+
+# GPU (opcional)
+pip install faiss-gpu
 ```
 
 ---
 
-## 3. Flujo completo de trabajo
-
-### `EmbeddingPipeline.run(reembed=False)`
+## Flujo de `EmbeddingPipeline.run()`
 
 ```
-1. init_embedding_schema()           ← garantiza que las tablas existen
-2. [si reembed] reset_embeddings()   ← borra todos los embeddings de la BD
-3. ChunkEmbedder(model_name)         ← carga el modelo (puede tardar)
-   FaissIndexManager(dim, ...)       ← crea el manager
-   faiss_mgr.load()                  ← intenta cargar índice previo de disco
-4. check_and_sync(faiss_mgr, BD)     ← reconstruye si FAISS < BD (desincronía)
-5. Para cada lote de chunks pendientes:
+1. init_embedding_schema()
+       ↓  crea faiss_log y embedding_meta si no existen
+
+2. [Si reembed=True]  reset_embeddings()
+       ↓  pone embedding=NULL en todos los chunks
+
+3. ChunkEmbedder(model_name, device)       FaissIndexManager(dim, nlist, m, nbits, …)
+       ↓  carga modelo                           ↓  load() desde disco
+       └────────────────────────────────────────┘
+
+4. check_and_sync(faiss_mgr, embedded_count, db_path)
+       ↓  si FAISS tiene menos vectores que embeddings en BD → rebuild()
+
+5. Para cada lote de chunks con embedding=NULL:
    a. process_batch(rows, embedder, faiss_mgr, db_path)
-      ├── embedder.encode(texts)      → vectors (N, dim)
-      ├── save_chunk_embeddings_batch → BD
-      └── faiss_mgr.add(vectors, ids) → índice en memoria
+        ├─ embedder.encode(texts)          → ndarray (N, dim) float32
+        ├─ save_chunk_embeddings_batch()   → persiste BLOB en chunks.embedding
+        └─ faiss_mgr.add(vectors, ids)     → añade al índice en memoria
    b. faiss_mgr.maybe_rebuild(db_path)
-      └── [si umbral alcanzado] rebuild() → entrena IVFPQ + save()
-6. faiss_mgr.save()                  ← guardado final en disco
-7. save_run_meta(stats)              ← timestamp, modelo, chunks procesados
-8. return stats
+        ↓  rebuild() si added_since_last_rebuild >= rebuild_every
+
+6. faiss_mgr.save()
+       ↓  escribe index.faiss + id_map.npy
+
+7. log_faiss_build()    → registra en faiss_log
+   save_run_meta()      → persiste model_name, last_run_at, etc. en embedding_meta
+
+8. Devuelve dict con estadísticas del run
 ```
 
-### Política de rebuild del índice FAISS
-
-El índice se reconstruye completamente cuando `_added_since_last_rebuild >= rebuild_every` (por defecto 10 000). En cada reconstrucción:
-- Si hay `>= min_train_size(nlist, nbits)` vectores → `IndexIVFPQ` (comprimido, rápido).
-- Si no hay suficientes → `IndexFlatL2` (exacto, sin compresión).
-
-El índice IVFPQ reemplaza automáticamente al FlatL2 en la primera reconstrucción con datos suficientes.
-
 ---
 
-## 4. Módulos — referencia detallada
+## `ChunkEmbedder`
 
-### 4.1 `embedder.py`
+Wrapper delgado sobre `SentenceTransformer`. Responsabilidad única: recibir
+listas de strings y devolver arrays NumPy normalizados. No accede a BD ni FAISS.
 
-**Propósito:** wrapper ligero sobre `SentenceTransformer` para uso en el pipeline.
+```python
+from backend.embedding.embedder import ChunkEmbedder
 
-**Clase:** `ChunkEmbedder`
+embedder = ChunkEmbedder(
+    model_name = "all-MiniLM-L6-v2",  # dim=384, divisible por m=8 y m=16
+    device     = None,                 # autodetección (cpu/cuda/mps)
+    batch_size = 64,                   # frases por llamada interna al modelo
+    normalize  = True,                 # L2-normalización (recomendado para coseno)
+)
 
-#### `__init__(model_name, device, batch_size, normalize)`
+vecs = embedder.encode(["chunk A", "chunk B"])
+# → ndarray float32, shape (2, 384), L2-normalizado
 
-| Parámetro | Tipo | Default | Descripción |
-|---|---|---|---|
-| `model_name` | `str` | `"all-MiniLM-L6-v2"` | Nombre o ruta del modelo. |
-| `device` | `str \| None` | `None` | `'cpu'`, `'cuda'`, `'mps'` o autodetección. |
-| `batch_size` | `int` | `64` | Frases por lote en la inferencia interna. |
-| `normalize` | `bool` | `True` | L2-normaliza los vectores (recomendado para similitud coseno). |
+single = embedder.encode_single("una query")
+# → ndarray float32, shape (384,)
 
-**Propiedades:**
-
-| Propiedad | Tipo | Descripción |
-|---|---|---|
-| `dim` | `int` | Dimensión del espacio de embedding del modelo. |
-
-#### `encode(texts) -> np.ndarray`
-
-| Parámetro | Tipo | Descripción |
-|---|---|---|
-| `texts` | `Sequence[str]` | Lista de textos a vectorizar. |
-
-**Salida:** `np.ndarray` de shape `(N, dim)`, dtype `float32`. Los textos vacíos se sustituyen por `" "` para evitar errores del modelo.
-
-#### `encode_single(text) -> np.ndarray`
-
-Equivalente a `encode([text])[0]`. Útil para vectorizar queries en `semantic_query`.
-
-**Salida:** `np.ndarray` 1-D de shape `(dim,)`.
-
----
-
-### 4.2 `pipeline.py`
-
-**Propósito:** coordinar el flujo completo de vectorización delegando en los módulos internos.
-
-**Clase:** `EmbeddingPipeline`
-
-#### `__init__(db_path, model_name, device, batch_size, rebuild_every, nlist, m, nbits, nprobe, index_path, id_map_path)`
-
-| Parámetro | Tipo | Default | Descripción |
-|---|---|---|---|
-| `db_path` | `Path` | `data/documents.db` | BD SQLite. |
-| `model_name` | `str` | `"all-MiniLM-L6-v2"` | Modelo sentence-transformers. |
-| `device` | `str \| None` | `None` | Dispositivo de inferencia. |
-| `batch_size` | `int` | `256` | Chunks por lote. |
-| `rebuild_every` | `int` | `10000` | Chunks entre rebuilds de FAISS. |
-| `nlist` | `int` | `100` | Celdas Voronoi para IVFPQ. |
-| `m` | `int` | `8` | Subvectores PQ (debe dividir `dim`). |
-| `nbits` | `int` | `8` | Bits por código PQ. |
-| `nprobe` | `int` | `10` | Celdas inspeccionadas en búsqueda. |
-| `index_path` | `Path` | `data/faiss/index.faiss` | Fichero .faiss. |
-| `id_map_path` | `Path` | `data/faiss/id_map.npy` | Fichero .npy de IDs. |
-
-#### `run(reembed=False) -> dict`
-
-| Parámetro | Tipo | Descripción |
-|---|---|---|
-| `reembed` | `bool` | Si `True`, resetea embeddings y re-vectoriza todo el corpus. |
-
-**Salida:** `dict` con `chunks_processed`, `chunks_skipped`, `batches_processed`, `rebuilds_triggered`, `model_name`, `started_at`, `finished_at`.
-
----
-
-### 4.3 `_sync.py`
-
-**Propósito:** detectar y corregir desincronizaciones entre el índice FAISS y la BD.
-
-#### `check_and_sync(faiss_mgr, already_embedded, db_path) -> None`
-
-Compara `faiss_mgr.total_vectors` con `already_embedded`. Si hay menos vectores en FAISS que embeddings en BD, llama a `faiss_mgr.rebuild()` para sincronizar.
-
-| Parámetro | Tipo | Descripción |
-|---|---|---|
-| `faiss_mgr` | `FaissIndexManager` | Gestor del índice. |
-| `already_embedded` | `int` | Chunks con embedding en la BD. |
-| `db_path` | `Path` | BD SQLite. |
-
-#### `reset_embeddings(db_path) -> int`
-
-Pone a `NULL` todos los embeddings de la tabla `chunks`. Devuelve el número de registros afectados.
-
----
-
-### 4.4 `_batch.py`
-
-**Propósito:** vectorizar un lote y persistir el resultado en BD e índice FAISS.
-
-#### `process_batch(rows, embedder, faiss_mgr, db_path) -> tuple[int, int]`
-
-| Parámetro | Tipo | Descripción |
-|---|---|---|
-| `rows` | `list[sqlite3.Row]` | Filas con `id`, `arxiv_id`, `chunk_index`, `text`. |
-| `embedder` | `ChunkEmbedder` | Instancia ya inicializada. |
-| `faiss_mgr` | `FaissIndexManager` | Gestor del índice compartido. |
-| `db_path` | `Path` | BD SQLite. |
-
-**Salida:** `(n_processed, n_skipped)` donde `n_skipped` cuenta los chunks con texto vacío que se omitieron.
-
-**Pasos internos:**
-1. Filtrar chunks con texto vacío.
-2. `embedder.encode(valid_texts)` → `vectors (N, dim)`.
-3. `save_chunk_embeddings_batch(db_batch, db_path)` → serializa y persiste en BD.
-4. `faiss_mgr.add(vectors, valid_ids)` → añade al índice en memoria.
-
----
-
-### 4.5 `_meta.py`
-
-**Propósito:** registrar metadatos de cada ejecución y mostrar estadísticas por CLI.
-
-#### `log_faiss_build(faiss_mgr, model_name, db_path) -> None`
-
-Llama a `faiss_mgr.build_stats()` y persiste el resultado en la tabla `faiss_log` de la BD.
-
-#### `save_run_meta(stats, db_path) -> None`
-
-Guarda `last_run_at`, `last_chunks_embedded` y `last_model` en la tabla `embedding_meta`.
-
-#### `print_stats(db_path) -> None`
-
-Lee `embedding_meta` y `faiss_log` y muestra un resumen por stdout. Usada por el flag `--stats` de la CLI.
-
----
-
-### 4.6 `main.py`
-
-**Propósito:** entrypoint del módulo (`python -m backend.embedding`).
-
-Parsea argumentos con `argparse`, construye un `EmbeddingPipeline` y llama a `.run()`. Si se pasa `--stats`, llama a `print_stats()` y sale.
-
----
-
-### 4.7 `faiss/constants.py`
-
-**Propósito:** centralizar todos los literales del subpaquete FAISS.
-
-| Constante | Valor | Descripción |
-|---|---|---|
-| `MIN_TRAIN_FACTOR` | `39` | Vectores mínimos por celda de Voronoi para entrenar K-means. |
-| `DEFAULT_NLIST` | `100` | Celdas Voronoi por defecto. |
-| `DEFAULT_M` | `8` | Subvectores PQ por defecto. |
-| `DEFAULT_NBITS` | `8` | Bits por código PQ por defecto. |
-| `DEFAULT_NPROBE` | `10` | Celdas inspeccionadas en búsqueda por defecto. |
-| `DEFAULT_REBUILD_EVERY` | `10000` | Chunks entre rebuilds por defecto. |
-
----
-
-### 4.8 `faiss/builder.py`
-
-**Propósito:** construir índices FAISS. No gestiona estado ni persistencia.
-
-#### `min_train_size(nlist, nbits) -> int`
-
-Calcula el mínimo de vectores para entrenar `IndexIVFPQ` de forma estable. Devuelve `max(nlist * 39, 2^nbits)`.
-
-#### `effective_nlist(n_vectors, max_nlist) -> int`
-
-Calcula el `nlist` ajustado al corpus: `max(4, min(max_nlist, sqrt(n_vectors)))`.
-
-#### `build_flat(faiss_module, dim) -> IndexFlatL2`
-
-Crea un índice de búsqueda exacta sin entrenamiento. Devuelve `faiss.IndexFlatL2(dim)`.
-
-#### `build_ivfpq(faiss_module, dim, training_vectors, nlist, m, nbits, nprobe) -> IndexIVFPQ`
-
-Crea y entrena un `IndexIVFPQ`. Ajusta `nlist` al tamaño real del corpus con `effective_nlist`. Devuelve el índice entrenado, listo para añadir vectores.
-
----
-
-### 4.9 `faiss/index_manager.py`
-
-**Propósito:** gestionar el ciclo de vida completo del índice FAISS.
-
-**Clase:** `FaissIndexManager`
-
-**Propiedades:**
-
-| Propiedad | Tipo | Descripción |
-|---|---|---|
-| `total_vectors` | `int` | Número de vectores actualmente en el índice. |
-| `index_type` | `str` | `"IndexIVFPQ"`, `"IndexFlatL2"` o `"none"`. |
-
-**Métodos:**
-
-| Método | Entrada | Salida | Descripción |
-|---|---|---|---|
-| `add(vectors, chunk_ids)` | `ndarray, list[int]` | `None` | Añade vectores al índice. Inicializa FlatL2 si el índice no existe. |
-| `rebuild(db_path)` | `Path` | `dict` | Reconstruye el índice completo desde la BD. Elige IVFPQ o FlatL2 según datos disponibles. Llama a `save()` al terminar. |
-| `maybe_rebuild(db_path)` | `Path` | `bool` | Llama a `rebuild()` si `_added_since_last_rebuild >= rebuild_every`. Devuelve `True` si reconstruyó. |
-| `search(query_vector, top_k)` | `ndarray, int` | `list[dict]` | Busca los `top_k` chunks más cercanos. Devuelve `[{"chunk_id": int, "score": float}]`. |
-| `save()` | — | `None` | Serializa el índice y el mapa de IDs en disco. |
-| `load()` | — | `bool` | Carga índice y mapa de IDs desde disco. Devuelve `True` si los ficheros existían. |
-| `build_stats()` | — | `dict` | Stats del índice actual: `n_vectors`, `index_type`, `nlist`, `m`, `nbits`, rutas. |
-
----
-
-## 5. Librerías utilizadas
-
-| Librería | Origen | Dónde se usa | Propósito |
-|---|---|---|---|
-| `sentence-transformers` | **externa** | `embedder.py` | Modelos de embedding de texto. |
-| `numpy` | **externa** | `faiss/`, `_batch.py`, `embedder.py` | Operaciones con arrays de vectores. |
-| `faiss-cpu` / `faiss-gpu` | **externa** | `faiss/index_manager.py`, `faiss/builder.py` | Índice vectorial de búsqueda aproximada. |
-| `sqlite3` (vía repo) | stdlib | `pipeline.py`, `_batch.py`, `_sync.py`, `_meta.py` | Persistencia de embeddings y metadatos. |
-| `pathlib` | stdlib | Todos los módulos | Rutas del sistema de ficheros. |
-| `logging` | stdlib | Todos los módulos | Logs estructurados. |
-| `math` | stdlib | `faiss/builder.py` | Cálculo de `sqrt` para `effective_nlist`. |
-| `time` | stdlib | `faiss/builder.py`, `faiss/index_manager.py` | Medición de tiempos de entrenamiento. |
-| `datetime` | stdlib | `_batch.py`, `pipeline.py` | Timestamps de los embeddings. |
-| `argparse` | stdlib | `main.py` | Parseo de argumentos CLI. |
-
----
-
-## 6. Referencia de argumentos CLI
-
-```
-python -m backend.embedding [opciones]
+print(embedder.dim)   # 384
 ```
 
-| Argumento | Tipo | Default | Descripción |
-|---|---|---|---|
-| `--db` | Path | `data/documents.db` | Ruta a la BD SQLite. |
-| `--model` | str | `all-MiniLM-L6-v2` | Modelo sentence-transformers. |
-| `--device` | str | `None` | `cpu`, `cuda`, `mps` o autodetección. |
-| `--batch-size` | int | `256` | Chunks por lote de vectorización. |
-| `--rebuild-every` | int | `10000` | Chunks entre rebuilds completos de FAISS. |
-| `--nlist` | int | `100` | Celdas Voronoi para IVFPQ. |
-| `--m` | int | `8` | Subvectores PQ (debe dividir la dimensión del modelo). |
-| `--nbits` | int | `8` | Bits por código PQ. |
-| `--nprobe` | int | `10` | Celdas inspeccionadas durante la búsqueda. |
-| `--index-path` | Path | `data/faiss/index.faiss` | Ruta del fichero .faiss. |
-| `--id-map-path` | Path | `data/faiss/id_map.npy` | Ruta del fichero .npy de IDs. |
-| `--reembed` | flag | — | Resetear embeddings y re-vectorizar todo el corpus. |
-| `--stats` | flag | — | Mostrar estadísticas del estado actual y salir. |
+Los textos vacíos o `None` se sustituyen por `" "` antes de pasar al modelo
+para evitar errores. Los vectores de salida están garantizados en `float32`
+(requisito de FAISS).
+
+**Modelo por defecto:** `all-MiniLM-L6-v2` — 384 dimensiones, ~80 MB,
+equilibrio calidad/velocidad/tamaño para corpus científico en inglés.
+
+---
+
+## `FaissIndexManager`
+
+Gestiona el ciclo de vida completo del índice FAISS: creación, actualización
+incremental, búsqueda y persistencia en disco.
+
+### Tipos de índice
+
+| Tipo | Cuándo | Características |
+|---|---|---|
+| `IndexFlatL2` | `n < min_train_size(nlist, nbits)` | Búsqueda exacta, sin entrenamiento |
+| `IndexIVFPQ` | `n >= min_train_size(nlist, nbits)` | Aproximada, cuantización PQ, rápida |
+
+El umbral mínimo para `IndexIVFPQ` es:
+
+```
+min_train_size = max(nlist × 39, 2^nbits)
+```
+
+Con los parámetros por defecto (`nlist=100`, `nbits=8`): **mínimo 3 900 vectores**.
+
+La transición de `IndexFlatL2` a `IndexIVFPQ` ocurre automáticamente en el
+primer `rebuild()` que supera el umbral.
+
+### `nlist` efectivo
+
+FAISS recomienda `nlist ≈ √n_vectors`. `builder.effective_nlist()` calcula
+el valor ajustado automáticamente respetando el techo configurado.
+
+### `m` — subvectores PQ
+
+**Debe dividir exactamente a `dim`.** Con `dim=384`: valores válidos son
+`m=8`, `m=16`, `m=24`, `m=32`, etc. El constructor lanza `ValueError` si
+no se cumple esta restricción.
+
+### API principal
+
+```python
+from backend.embedding.faiss import FaissIndexManager
+
+mgr = FaissIndexManager(
+    dim=384, nlist=100, m=8, nbits=8, nprobe=10,
+    rebuild_every=10_000,
+    index_path=Path("data/faiss/index.faiss"),
+    id_map_path=Path("data/faiss/id_map.npy"),
+)
+
+# Añadir vectores
+mgr.add(vectors, chunk_ids)    # ndarray (N, dim) + list[int]
+
+# Búsqueda
+results = mgr.search(query_vec, top_k=10)
+# → list[{"chunk_id": int, "score": float}]  ordenada por distancia L2 asc
+
+# Persistencia
+mgr.save()                     # escribe .faiss + .npy
+mgr.load()                     # → bool (True si encontró ficheros)
+
+# Reconstrucción
+mgr.rebuild(db_path)           # lee todos los embeddings de BD y reconstruye
+mgr.maybe_rebuild(db_path)     # → bool; rebuild si added >= rebuild_every
+
+# Estado
+mgr.total_vectors              # int: vectores en el índice
+mgr.index_type                 # str: "IndexFlatL2" | "IndexIVFPQ" | "none"
+mgr.build_stats()              # dict: n_vectors, index_type, nlist, m, nbits, paths
+```
+
+### Mapa de IDs
+
+El índice FAISS solo conoce posiciones internas (0, 1, 2…). El archivo
+`id_map.npy` es un `ndarray int64` que mapea cada posición al `chunk_id`
+real de la tabla `chunks`:
+
+```
+posición FAISS 0 → id_map[0] = chunk_id 42
+posición FAISS 1 → id_map[1] = chunk_id 117
+…
+```
+
+`search()` traduce automáticamente los índices FAISS a `chunk_id`.
+
+---
+
+## `_batch.py` — Procesamiento por lote
+
+`process_batch(rows, embedder, faiss_mgr, db_path)` ejecuta tres pasos para
+cada lote de `sqlite3.Row` con columnas `id`, `text`:
+
+1. Filtra chunks con texto vacío (`n_skipped`)
+2. `embedder.encode(valid_texts)` → `ndarray (N, dim)`
+3. Serializa: `vec.tobytes()` → `save_chunk_embeddings_batch([(bytes, ts, id), …])`
+4. `faiss_mgr.add(vectors, valid_ids)`
+
+Devuelve `(n_processed, n_skipped)`.
+
+---
+
+## `_sync.py` — Sincronización FAISS ↔ BD
+
+`check_and_sync(faiss_mgr, already_embedded, db_path)` se ejecuta al inicio
+de cada `run()` para detectar desincronizaciones:
+
+```
+Embeddings en BD: 5 000  |  Vectores en FAISS: 3 200
+         ↓  desincronización detectada
+faiss_mgr.rebuild(db_path)  ← reconstruye desde BD
+```
+
+Las desincronizaciones ocurren cuando el proceso se reinicia después de
+haber generado embeddings pero antes de haber guardado el índice.
+
+`reset_embeddings(db_path)` pone `embedding=NULL` en todos los chunks.
+Se llama cuando `reembed=True` para re-vectorizar con un modelo diferente.
+
+---
+
+## `_meta.py` — Metadatos y estadísticas
+
+| Función | Descripción |
+|---|---|
+| `log_faiss_build(faiss_mgr, model_name, db_path)` | Registra en `faiss_log`: n_vectors, index_type, nlist, m, nbits, paths |
+| `save_run_meta(stats, db_path)` | Persiste en `embedding_meta`: `last_run_at`, `last_chunks_embedded`, `last_model` |
+| `print_stats(db_path)` | Imprime resumen por stdout (flag `--stats` de la CLI) |
+
+---
+
+## CLI (via `backend/tools/embed_chunks.py`)
+
+```bash
+# Embedizar chunks pendientes (incremental)
+python -m backend.tools.embed_chunks
+
+# Modelo diferente
+python -m backend.tools.embed_chunks --model all-mpnet-base-v2
+
+# Re-embedizar todo el corpus desde cero
+python -m backend.tools.embed_chunks --reembed
+
+# Ajustar parámetros FAISS
+python -m backend.tools.embed_chunks --nlist 200 --m 16 --nprobe 20
+
+# Ver estado sin procesar
+python -m backend.tools.embed_chunks --stats
+
+# Especificar BD y dispositivo
+python -m backend.tools.embed_chunks --db /ruta/a/db.sqlite --device cuda
+```
+
+---
+
+## Tests
+
+Los tests están en `backend/tests/embedding/`.
+
+```bash
+pytest backend/tests/embedding/ -v
+
+pytest backend/tests/embedding/test_chunk_repository.py     -v
+pytest backend/tests/embedding/test_embedding_repository.py -v
+pytest backend/tests/embedding/test_faiss_index.py          -v
+pytest backend/tests/embedding/test_pipeline.py             -v
+```
+
+### Qué cubre cada archivo
+
+| Archivo | Qué verifica |
+|---|---|
+| `test_chunk_repository.py` | `save_chunks`, `get_chunks`, conteos, `get_unembedded_chunks_iter`, `save_chunk_embeddings_batch`, `get_all_embeddings_iter`, `reset_embeddings` |
+| `test_embedding_repository.py` | `log_faiss_build`, `save/get_embedding_meta`, `get_embedding_stats` (claves devueltas) |
+| `test_faiss_index.py` | `add`+`search` (chunk_id correcto), `save`/`load` round-trip, `rebuild` → transición a IndexIVFPQ, `maybe_rebuild`, thread-safety con 5 hilos |
+| `test_pipeline.py` | Pipeline end-to-end con `MockEmbedder` inyectado: vectores persistidos en BD, añadidos a FAISS, búsqueda devuelve resultados |
+
+El `conftest.py` define `MockEmbedder` (dim=64, normalizado, sin GPU),
+`db_path` (BD SQLite en `tmp_path` con 3 docs y 9 chunks) y `faiss_dir`.
+Los tests de FAISS usan el `FaissIndexManager` real para verificar la
+serialización binaria y el mapa de IDs.
+
+> Los tests usan `dim=64` y corpus pequeños. Para IndexIVFPQ se insertan
+> 300 documentos sintéticos extra en `test_rebuild_produces_ivfpq` para
+> superar el umbral `min_train_size(nlist=4, nbits=8) = max(156, 256) = 256`.

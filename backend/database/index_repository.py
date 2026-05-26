@@ -435,3 +435,98 @@ def get_document_metadata(
         return {r["arxiv_id"]: dict(r) for r in rows}
     finally:
         conn.close()
+
+# ---------------------------------------------------------------------------
+# Consultas LSI / retrieval (centralizadas desde módulos externos)
+# ---------------------------------------------------------------------------
+
+def get_indexed_doc_count(db_path: Path = DB_PATH) -> int:
+    """
+    Devuelve el número de documentos distintos que tienen postings en el
+    índice invertido TF (tabla postings).
+
+    Usado por el orquestador para decidir si hay suficientes documentos
+    para reconstruir el modelo LSI.
+    """
+    conn = get_connection(db_path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(DISTINCT doc_id) FROM postings"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def get_term_words_by_ids(
+    term_ids: list[int],
+    db_path:  Path = DB_PATH,
+) -> list:
+    """
+    Devuelve filas (term_id, word) para los term_ids proporcionados.
+
+    Divide la consulta en lotes de 900 para respetar el límite de
+    variables de SQLite.
+
+    Parámetros
+    ----------
+    term_ids : lista de IDs de la tabla terms.
+
+    Devuelve
+    --------
+    Lista de sqlite3.Row con columnas ``term_id`` y ``word``.
+    Lista vacía si term_ids está vacío.
+    """
+    if not term_ids:
+        return []
+
+    _CHUNK = 900
+    rows: list = []
+    conn = get_connection(db_path)
+    try:
+        for offset in range(0, len(term_ids), _CHUNK):
+            chunk = term_ids[offset : offset + _CHUNK]
+            ph = ",".join("?" * len(chunk))
+            rows.extend(
+                conn.execute(
+                    f"SELECT term_id, word FROM terms WHERE term_id IN ({ph})",
+                    chunk,
+                ).fetchall()
+            )
+    finally:
+        conn.close()
+    return rows
+
+
+def log_lsi_build(
+    built_at:     str,
+    k:            int,
+    n_docs:       int,
+    n_terms:      int,
+    var_explained: float,
+    model_path:   str,
+    db_path:      Path = DB_PATH,
+) -> None:
+    """
+    Registra una sesión de construcción del modelo LSI en la tabla lsi_log.
+
+    Parámetros
+    ----------
+    built_at      : timestamp ISO de la construcción.
+    k             : número de componentes latentes del SVD.
+    n_docs        : documentos incluidos en el modelo.
+    n_terms       : términos del vocabulario.
+    var_explained : varianza explicada acumulada (0-1).
+    model_path    : ruta al fichero .pkl guardado.
+    """
+    conn = get_connection(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO lsi_log (built_at, k, n_docs, n_terms, var_explained, model_path)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (built_at, k, n_docs, n_terms, var_explained, model_path),
+        )
+        conn.commit()
+    finally:
+        conn.close()

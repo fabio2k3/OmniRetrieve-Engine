@@ -411,3 +411,88 @@ def get_chunk_stats(db_path: Path = DB_PATH) -> dict[str, Any]:
         "embedded_chunks": embedded,
         "pending_chunks":  total - embedded,
     }
+
+def get_chunks_with_metadata_by_arxiv_ids(
+    arxiv_ids: list[str],
+    db_path:   Path = DB_PATH,
+) -> list:
+    """
+    Devuelve todos los chunks de los documentos indicados, con metadatos
+    del documento (title, authors, pdf_url) obtenidos mediante JOIN.
+
+    Usado por LSIRetriever para expandir resultados a nivel documento
+    a resultados a nivel chunk sin escribir SQL fuera del módulo database.
+
+    Parámetros
+    ----------
+    arxiv_ids : lista de arxiv_ids cuyos chunks se quieren recuperar.
+
+    Devuelve
+    --------
+    Lista de sqlite3.Row con columnas:
+        chunk_id, arxiv_id, chunk_index, text, title, authors, pdf_url.
+    Lista vacía si arxiv_ids está vacío.
+    """
+    if not arxiv_ids:
+        return []
+
+    placeholders = ",".join("?" * len(arxiv_ids))
+    conn = get_connection(db_path)
+    try:
+        return conn.execute(
+            f"""
+            SELECT c.id        AS chunk_id,
+                   c.arxiv_id,
+                   c.chunk_index,
+                   c.text,
+                   d.title,
+                   d.authors,
+                   d.pdf_url
+            FROM   chunks    c
+            JOIN   documents d USING (arxiv_id)
+            WHERE  c.arxiv_id IN ({placeholders})
+            """,
+            arxiv_ids,
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def get_chunk_embeddings_by_ids(
+    chunk_ids: list[int],
+    db_path:   Path = DB_PATH,
+) -> list:
+    """
+    Devuelve filas (id, embedding) para los chunk_ids que tienen embedding.
+
+    Ignora silenciosamente los IDs sin embedding (embedding IS NOT NULL).
+    Divide la consulta en lotes de 900 para respetar el límite de SQLite.
+
+    Parámetros
+    ----------
+    chunk_ids : lista de IDs de la tabla chunks.
+
+    Devuelve
+    --------
+    Lista de sqlite3.Row con columnas ``id`` y ``embedding`` (BLOB).
+    """
+    if not chunk_ids:
+        return []
+
+    _CHUNK = 900
+    rows: list = []
+    conn = get_connection(db_path)
+    try:
+        for offset in range(0, len(chunk_ids), _CHUNK):
+            batch = chunk_ids[offset : offset + _CHUNK]
+            ph = ",".join("?" * len(batch))
+            rows.extend(
+                conn.execute(
+                    f"SELECT id, embedding FROM chunks "
+                    f"WHERE id IN ({ph}) AND embedding IS NOT NULL",
+                    batch,
+                ).fetchall()
+            )
+    finally:
+        conn.close()
+    return rows

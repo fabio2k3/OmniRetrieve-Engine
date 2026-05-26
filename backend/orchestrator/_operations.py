@@ -27,7 +27,7 @@ import logging
 import threading
 from typing import Optional, TYPE_CHECKING
 
-from backend.database.schema import get_connection
+from backend.database.index_repository import get_indexed_doc_count
 from backend.indexing.pipeline import IndexingPipeline
 from backend.embedding.pipeline import EmbeddingPipeline
 from backend.embedding import FaissIndexManager
@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Indexación BM25 (terms + postings)
+# Indexación TF — índice invertido (terms + postings)
 # ---------------------------------------------------------------------------
 
 def do_index(cfg: OrchestratorConfig) -> dict:
@@ -91,11 +91,7 @@ def do_lsi_rebuild(
     Returns ``dict`` con stats o ``None`` si no hay suficientes docs o falla.
     """
     try:
-        conn = get_connection(cfg.db_path)
-        n_indexed = conn.execute(
-            "SELECT COUNT(DISTINCT doc_id) FROM postings"
-        ).fetchone()[0]
-        conn.close()
+        n_indexed = get_indexed_doc_count(cfg.db_path)
     except Exception as exc:
         log.warning("[lsi] No se pudo consultar la BD: %s", exc)
         return None
@@ -201,15 +197,22 @@ def do_web_search(
             "query": query, "indexed": 0,
         }
 
-    pipeline = WebSearchPipeline(
-        threshold    = cfg.web_threshold,
-        min_docs     = cfg.web_min_docs,
-        max_results  = cfg.web_max_results,
-        search_depth = cfg.web_search_depth,
-        use_fallback = cfg.web_use_fallback,
-        auto_index   = cfg.web_auto_index,
-        db_path      = cfg.db_path,
-    )
+    try:
+        pipeline = WebSearchPipeline(
+            threshold    = cfg.web_threshold,
+            min_docs     = cfg.web_min_docs,
+            max_results  = cfg.web_max_results,
+            search_depth = cfg.web_search_depth,
+            use_fallback = cfg.web_use_fallback,
+            db_path      = cfg.db_path,
+        )
+    except Exception as exc:
+        log.error("[web_search] Error al inicializar WebSearchPipeline: %s", exc)
+        return {
+            "results": retriever_results, "web_activated": False,
+            "web_results": [], "reason": f"Pipeline error: {exc}",
+            "query": query, "indexed": 0,
+        }
     return pipeline.run(query=query, retriever_results=retriever_results)
 
 
@@ -400,6 +403,55 @@ def build_cross_encoder(cfg: OrchestratorConfig) -> "CrossEncoderReranker":
 # Pipeline unificado: QRF expand → Hybrid → Web → CrossEncoder → RAG
 # ---------------------------------------------------------------------------
 
+def _to_retrieval_results(results: list) -> list:
+    """
+    Convierte resultados mixtos (dicts web + RetrievalResult locales) a
+    list[RetrievalResult] para que CrossEncoderReranker los pueda procesar.
+    """
+    from backend.retrieval.protocols import RetrievalResult
+    out = []
+    for r in results:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        out.append(RetrievalResult(
+            chunk_id    = r.get("chunk_id", 0),
+            arxiv_id    = r.get("arxiv_id", ""),
+            chunk_index = r.get("chunk_index", 0),
+            text        = r.get("content") or r.get("abstract") or r.get("text", ""),
+            score       = float(r.get("score", 0.5)),
+            score_type  = r.get("source", "web"),
+            metadata    = {
+                "title":  r.get("title", ""),
+                "url":    r.get("url", ""),
+                "source": r.get("source", "web"),
+            },
+        ))
+    return out
+
+
+def _retrieval_results_to_dicts(results: list) -> list[dict]:
+    """
+    Convierte list[RetrievalResult] a list[dict] para WebSearchPipeline,
+    que espera dicts con la clave 'score'.
+    """
+    out = []
+    for r in results:
+        if isinstance(r, dict):
+            out.append(r)
+            continue
+        out.append({
+            "score":       r.score,
+            "arxiv_id":    r.arxiv_id,
+            "chunk_id":    r.chunk_id,
+            "chunk_index": r.chunk_index,
+            "title":       r.metadata.get("title", r.arxiv_id or ""),
+            "abstract":    r.text[:300],
+            "source":      "local",
+        })
+    return out
+
+
 def do_pipeline_ask(
     query:           str,
     qrf_pipeline:    "QueryPipeline",
@@ -496,14 +548,16 @@ def do_pipeline_ask(
             min_docs     = cfg.web_min_docs,
             max_results  = cfg.web_max_results,
             search_depth = cfg.web_search_depth,
-            use_fallback = cfg.web_use_fallback,
-            auto_index   = cfg.web_auto_index,
-            db_path      = cfg.db_path,
+            use_fallback  = cfg.web_use_fallback,
+            seed_domains  = cfg.web_seed_domains or None,
+            db_path       = cfg.db_path,
         )
-        web_activated, all_results = web_pipeline.run_with_retrieval_results(
-            query=query,
-            retriever_results=hybrid_results,
-        )
+        # WebSearchPipeline espera list[dict] con clave 'score'
+        hybrid_dicts = _retrieval_results_to_dicts(hybrid_results)
+        web_out      = web_pipeline.run(query=query, retriever_results=hybrid_dicts)
+        web_activated = web_out["web_activated"]
+        # Convertir resultados mixtos (dict web + dict local) a RetrievalResult
+        all_results  = _to_retrieval_results(web_out["results"])
         log.info(
             "[pipeline] WebSearch: activada=%s candidatos_totales=%d",
             web_activated, len(all_results),

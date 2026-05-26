@@ -42,7 +42,7 @@ sys.path.insert(0, str(ROOT))
 
 from backend.database.schema import DB_PATH, get_connection
 from backend.database.chunk_repository import save_chunks, get_chunk_stats
-from backend.crawler.chunker import _split_into_chunks
+from backend.crawler.chunker import make_chunks
 
 # ── Colores ANSI ──────────────────────────────────────────────────────────────
 BOLD   = "\033[1m"
@@ -185,9 +185,9 @@ def rebuild_chunks(
         full_text = doc["full_text"]
 
         try:
-            new_chunks = _split_into_chunks(
+            new_chunks = make_chunks(
                 full_text,
-                max_chars=chunk_size,
+                chunk_size=chunk_size,
                 overlap_sentences=overlap_sentences,
             )
 

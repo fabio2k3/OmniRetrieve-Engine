@@ -1,35 +1,43 @@
 """
 generate_dataset.py
 ===================
-CLI para generar un EvalDataset desde la BD del sistema.
+CLI general para generar datasets de evaluación.
+
+Este script sigue siendo válido para generar un dataset mixto o para
+uso rápido. Para evaluaciones separadas y especializadas, usa:
+
+    Retrieval (exact + semantic):
+        python -m backend.eval.retrieval.generate_dataset
+
+    RAG (generated):
+        python -m backend.eval.rag.generate_dataset
+
+Tipos de caso
+-------------
+exact     — fragmento literal del chunk como query.
+            Evalúa retrieval léxico. Rápido, sin LLM.
+
+semantic  — paráfrasis del fragmento (LLM).
+            Evalúa retrieval semántico (FAISS/dense).
+
+generated — pregunta real de usuario generada por LLM.
+            Evalúa el sistema completo como lo usaría un usuario.
+            Recomendado para eval RAG end-to-end.
 
 Uso
 ---
     python -m backend.eval.generate_dataset [opciones]
 
-Opciones
---------
-  --sample-size    INT   Chunks a muestrear                         (default: 50)
-  --exact                Incluir casos exact (fragmento literal)
-  --semantic             Incluir casos semantic (paráfrasis LLM)
-  --generated            Incluir casos generated (queries reales LLM)  ← NUEVO
-  --model          STR   Modelo Ollama para LLM calls               (default: llama3.2:3b)
-  --output         PATH  Ruta de salida JSON                        (default: backend/data/eval/dataset.json)
-  --min-chars      INT   Tamaño mínimo del chunk                    (default: 200)
-  --fragment-sents INT   Oraciones a extraer como semilla           (default: 2)
-  --seed           INT   Semilla aleatoria                          (default: 42)
-  --verbose              Activa logging DEBUG
-
 Ejemplos
 --------
-    # Solo queries reales (recomendado para eval RAG)
+    # Solo exact (sin LLM, para retrieval rápido)
+    python -m backend.eval.generate_dataset --exact --sample-size 100
+
+    # Dataset RAG (solo preguntas generadas por LLM)
     python -m backend.eval.generate_dataset --generated --sample-size 50
 
     # Dataset completo con los tres tipos
-    python -m backend.eval.generate_dataset --exact --semantic --generated --sample-size 50
-
-    # Rápido, sin LLM (solo exact)
-    python -m backend.eval.generate_dataset --exact --sample-size 100
+    python -m backend.eval.generate_dataset --exact --semantic --generated
 """
 
 from __future__ import annotations
@@ -72,10 +80,10 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    # Si no se selecciona ningún tipo, activar generated por defecto
     include_exact     = args.exact
     include_semantic  = args.semantic
     include_generated = args.generated
+
     if not any([include_exact, include_semantic, include_generated]):
         print("[eval] No se especificó tipo. Activando --generated por defecto.")
         include_generated = True
@@ -83,24 +91,25 @@ def main() -> int:
     from backend.eval.dataset_generator import DatasetGenerator
 
     gen = DatasetGenerator(
-        sample_size=args.sample_size,
-        include_exact=include_exact,
-        include_semantic=include_semantic,
-        include_generated=include_generated,
-        min_chunk_chars=args.min_chars,
-        fragment_sentences=args.fragment_sents,
-        paraphrase_model=args.model,
-        query_gen_model=args.model,
-        seed=args.seed,
+        sample_size       = args.sample_size,
+        include_exact     = include_exact,
+        include_semantic  = include_semantic,
+        include_generated = include_generated,
+        min_chunk_chars   = args.min_chars,
+        fragment_sentences= args.fragment_sents,
+        paraphrase_model  = args.model,
+        query_gen_model   = args.model,
+        seed              = args.seed,
     )
 
     types_str = " + ".join(
-        t for t, v in [("exact", include_exact),
-                       ("semantic", include_semantic),
-                       ("generated", include_generated)]
-        if v
+        t for t, v in [
+            ("exact",     include_exact),
+            ("semantic",  include_semantic),
+            ("generated", include_generated),
+        ] if v
     )
-    print(f"[eval] Generando dataset: tipos=[{types_str}] sample_size={args.sample_size}")
+    print(f"[eval] Generando dataset: tipos=[{types_str}]  sample_size={args.sample_size}")
 
     dataset = gen.generate()
 

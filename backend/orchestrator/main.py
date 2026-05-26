@@ -70,8 +70,8 @@ def _parse_args() -> argparse.Namespace:
     g.add_argument("--download-interval",  type=float, default=_D.download_interval)
     g.add_argument("--pdf-interval",       type=float, default=_D.pdf_interval)
 
-    # Indexing BM25
-    g = p.add_argument_group("indexing BM25")
+    # Indexing TF-IDF
+    g = p.add_argument_group("indexing TF-IDF")
     g.add_argument("--pdf-threshold",    type=int,   default=_D.pdf_threshold)
     g.add_argument("--index-poll",       type=float, default=_D.index_poll_interval)
     g.add_argument("--index-field",      type=str,   default=_D.index_field,
@@ -86,6 +86,10 @@ def _parse_args() -> argparse.Namespace:
     g.add_argument("--lsi-k",        type=int,   default=_D.lsi_k)
     g.add_argument("--lsi-min-docs",       type=int,   default=_D.lsi_min_docs)
     g.add_argument("--lsi-doc-candidates", type=int,   default=_D.lsi_doc_candidates)
+    g.add_argument("--lsi-min-df",         type=int,   default=_D.lsi_min_df,
+                   help="df mínimo para incluir un término en la matriz LSI.")
+    g.add_argument("--lsi-max-df-ratio",   type=float, default=_D.lsi_max_df_ratio,
+                   help="Fracción máxima del corpus para incluir un término en LSI.")
 
     # Embedding / FAISS
     g = p.add_argument_group("embedding / FAISS")
@@ -173,6 +177,8 @@ def main() -> None:
         "lsi_k":                args.lsi_k,
         "lsi_min_docs":         args.lsi_min_docs,
         "lsi_doc_candidates":   args.lsi_doc_candidates,
+        "lsi_min_df":           args.lsi_min_df,
+        "lsi_max_df_ratio":     args.lsi_max_df_ratio,
         "embed_model":          args.embed_model,
         "embed_batch_size":     args.embed_batch,
         "embed_poll_interval":  args.embed_poll,

@@ -5,7 +5,7 @@ Utilidades HTTP compartidas por todo el paquete crawler.
 
 Centraliza tres recursos que antes estaban duplicados o acoplados:
 
-    USER_AGENT  — cadena de identificación del crawler en todas las peticiones.
+    USER_AGENT  — valor por defecto del User-Agent (sobreescribible por cfg).
     _SSL_CTX    — contexto SSL único (usa certifi cuando está disponible,
                   degrada a verificación desactivada si no lo está).
     fetch_bytes — GET minimalista que devuelve bytes crudos o None si falla.
@@ -25,6 +25,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Valor por defecto del User-Agent. Los callers que tienen acceso a cfg
+# deben pasar cfg.crawler_user_agent en su lugar.
 USER_AGENT = "SRI-Crawler/1.0"
 
 
@@ -65,6 +67,7 @@ def fetch_bytes(
     url: str,
     timeout: int = 15,
     accept: str = "*/*",
+    user_agent: str = USER_AGENT,
 ) -> Optional[bytes]:
     """
     Realiza un GET y devuelve los bytes de la respuesta, o ``None`` si falla.
@@ -75,9 +78,12 @@ def fetch_bytes(
 
     Parámetros
     ----------
-    url     : URL a descargar.
-    timeout : tiempo máximo de espera en segundos.
-    accept  : valor del header ``Accept``.
+    url        : URL a descargar.
+    timeout    : tiempo máximo de espera en segundos.
+    accept     : valor del header ``Accept``.
+    user_agent : cadena User-Agent a enviar. Por defecto usa el valor
+                 del módulo; pasa ``cfg.crawler_user_agent`` para que
+                 sea configurable desde el orquestador.
 
     Returns
     -------
@@ -88,7 +94,7 @@ def fetch_bytes(
     try:
         req = urllib.request.Request(
             url,
-            headers={"User-Agent": USER_AGENT, "Accept": accept},
+            headers={"User-Agent": user_agent, "Accept": accept},
         )
         with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
             return resp.read()

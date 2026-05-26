@@ -33,10 +33,10 @@ from .._operations import (
 from ..config import OrchestratorConfig
 
 if TYPE_CHECKING:
-    from backend.qrf.pipeline import QueryPipeline
-    from backend.rag.pipeline import RAGPipeline
-    from backend.retrieval.hybrid_retriever import HybridRetriever
-    from backend.retrieval.reranker import CrossEncoderReranker
+    from backend.qrf import QueryPipeline
+    from backend.rag import RAGPipeline
+    from backend.retrieval import HybridRetriever
+    from backend.retrieval import CrossEncoderReranker
     from backend.embedding import FaissIndexManager
 
 log = logging.getLogger(__name__)

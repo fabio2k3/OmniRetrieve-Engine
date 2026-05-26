@@ -47,6 +47,10 @@ class OrchestratorConfig:
     lsi_min_docs         : mínimo de documentos indexados para construir el modelo.
     lsi_doc_candidates   : documentos LSI (por similitud coseno) a expandir a chunks
                            reales antes de devolver resultados al HybridRetriever.
+    lsi_min_df           : término debe aparecer en al menos este número de documentos
+                           para incluirse en la matriz TF-IDF del SVD. Elimina ruido.
+    lsi_max_df_ratio     : término no puede superar esta fracción del corpus. Elimina
+                           stop-words de dominio no capturadas por IDF.
 
     Embedding / FAISS
     -----------------
@@ -68,8 +72,9 @@ class OrchestratorConfig:
     web_min_docs      : docs mínimos que deben superar web_threshold.
     web_max_results   : máximo de resultados a pedir a Tavily / DuckDuckGo.
     web_search_depth  : profundidad de búsqueda Tavily ("basic" | "advanced").
-    web_use_fallback  : usar DuckDuckGo si Tavily falla.
-    web_auto_index    : indexar automáticamente los docs web guardados.
+    web_use_fallback  : usar SiteSearcher (dominios semilla) si Tavily falla.
+    web_seed_domains  : dominios académicos donde buscar. Lista vacía = usar
+                        DEFAULT_SEED_DOMAINS de web_search/sites.py.
 
     Retrieval general
     -----------------
@@ -77,7 +82,7 @@ class OrchestratorConfig:
                           rag_search(), rag_ask() y semantic_query() cuando
                           no se pasa top_k explícito.
 
-    Indexing (BM25)
+    Indexing (TF inverted index)
     ---------------
     pdf_threshold       : mínimo de PDFs nuevos sin indexar para disparar indexación.
     index_poll_interval : segundos entre sondeos del watcher.
@@ -135,7 +140,9 @@ class OrchestratorConfig:
     lsi_rebuild_interval: float = 3600.0
     lsi_k:                int   = 100
     lsi_min_docs:         int   = 10
-    lsi_doc_candidates:   int   = 20    # docs LSI a expandir a chunks por query
+    lsi_doc_candidates:   int   = 20
+    lsi_min_df:           int   = 20    # términos con df < min_df se excluyen del SVD
+    lsi_max_df_ratio:     float = 0.85  # términos en >85% de docs se excluyen del SVD    # docs LSI a expandir a chunks por query
 
     # ── embedding / FAISS ────────────────────────────────────────────────────
     embed_model:         str   = "all-MiniLM-L6-v2"
@@ -151,18 +158,19 @@ class OrchestratorConfig:
     faiss_id_map_path:   Path  = field(default_factory=lambda: _FAISS_ID_MAP)
 
     # ── web search ───────────────────────────────────────────────────────────
-    web_threshold:    float = 0.15
+    web_threshold:    float = 0.35
     web_min_docs:     int   = 1
     web_max_results:  int   = 5
     web_search_depth: str   = "basic"
-    web_use_fallback: bool  = True
-    web_auto_index:   bool  = True
+    web_use_fallback:  bool       = True
+    web_seed_domains:  list[str]  = field(default_factory=list)
+    # Lista vacía → usa DEFAULT_SEED_DOMAINS de web_search/sites.py
 
     # ── Retrieval general ────────────────────────────────────────────────────
     retrieval_top_k: int = 10    # resultados a devolver en los métodos standalone
                                   # (query, qrf_search, rag_search, rag_ask, semantic_query)
 
-    # ── indexing (BM25 — terms + postings) ───────────────────────────────────
+    # ── indexing (TF inverted index — terms + postings) ─────────────────────
     pdf_threshold:       int   = 10       # PDFs sin indexar para disparar el hilo
     index_poll_interval: float = 30.0    # segundos entre sondeos del watcher
     index_field:         str   = "both"  # 'full_text' | 'abstract' | 'both'

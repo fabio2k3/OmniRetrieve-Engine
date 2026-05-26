@@ -1,12 +1,12 @@
----
-noteId: "7f39b4c0296511f1b0a22758fc0c48d3"
-tags: []
+# OmniRetrieve — Módulo `indexing`
 
----
+Construye el **índice invertido de frecuencias** sobre el corpus descargado
+por el crawler. Lee los textos de la BD, los tokeniza y persiste las
+frecuencias crudas en las tablas `terms` y `postings`.
 
-# OmniRetrieve — Módulo de Indexación
-
-Construye el índice invertido de frecuencias sobre el corpus de artículos descargado por el crawler. Lee los textos de la base de datos, los tokeniza y persiste las frecuencias crudas en las tablas `terms` y `postings`.
+**No calcula pesos TF-IDF.** Solo cuenta y almacena frecuencias. La
+fórmula `log(1 + freq) × log((N+1)/(df+1))` la aplica el módulo
+`retrieval` al construir la matriz para el SVD de LSI.
 
 ---
 
@@ -14,10 +14,10 @@ Construye el índice invertido de frecuencias sobre el corpus de artículos desc
 
 ```
 backend/indexing/
-├── preprocessor.py    ← limpieza y tokenización de texto
-├── indexer.py         ← motor de indexación (TFIndexer)
-├── pipeline.py        ← orquestador + entrypoint CLI
-└── __init__.py        ← exports públicos
+├── preprocessor.py  ← TextPreprocessor: limpieza y tokenización
+├── indexer.py       ← TFIndexer: motor de indexación (3 pasos)
+├── pipeline.py      ← IndexingPipeline: coordinador + CLI
+└── __init__.py      ← exports públicos
 ```
 
 ---
@@ -25,136 +25,236 @@ backend/indexing/
 ## Instalación
 
 ```bash
+# Mínimo (usa stopwords básicas de fallback)
+# — sin dependencias adicionales —
+
+# Con NLTK (stopwords completas + stemming opcional)
 pip install nltk
-```
-
-| Paquete | Para qué |
-|---|---|
-| `nltk` | Stopwords y stemming. Opcional — si no está instalado se usan stopwords básicas de fallback |
-
-Si está instalado, descargar los recursos necesarios:
-
-```bash
 python -c "import nltk; nltk.download('stopwords'); nltk.download('punkt_tab')"
 ```
 
----
-
-## Cómo ejecutar
-
-```bash
-# Indexación incremental (solo documentos nuevos con PDF descargado)
-python -m backend.indexing.pipeline
-
-# Reindexar desde cero
-python -m backend.indexing.pipeline --reindex
-
-# Indexar solo el abstract (sin necesidad de PDF)
-python -m backend.indexing.pipeline --field abstract
-
-# Con stemming activado
-python -m backend.indexing.pipeline --stemming
-```
-
-### Parámetros disponibles
-
-```bash
-python -m backend.indexing.pipeline \
-  --db       ruta/a/documents.db   # BD a usar (default: data/db/documents.db) \
-  --field    full_text             # full_text | abstract | both (default: full_text) \
-  --batch-size 100                 # documentos por lote (default: 100) \
-  --reindex                        # borrar índice existente y reconstruir \
-  --stemming                       # activar SnowballStemmer (requiere NLTK) \
-  --min-len  3                     # longitud mínima de token (default: 3)
-```
+Si NLTK no está instalado el módulo funciona con un conjunto de stopwords
+básicas en inglés definido internamente (`_BASIC_STOPWORDS`, ~90 palabras).
+Se registra un `WARNING` al iniciarse.
 
 ---
 
-## Arquitectura
+## Flujo de `TFIndexer.build()`
 
 ```
-documento (full_text en BD)
+get_unindexed_documents()         ← docs con indexed_tfidf_at IS NULL
+        ↓  (arxiv_id, texto) por lote de batch_size
+
+TextPreprocessor.process(texto)
+        ↓  list[str] de tokens normalizados
+
+Counter(tokens)                   ← frecuencia cruda por término por doc
         ↓
-  TextPreprocessor
-  ─────────────────
-  minúsculas → elimina URLs/LaTeX/números
-  → elimina puntuación → tokeniza
-  → filtra stopwords → filtra no-alfa
-  → stemming (opcional)
+
+Acumular df_map {term: n_docs}    ← cuántos docs contienen cada término
+
+        ↓  (al terminar de leer todos los docs)
+
+upsert_terms(df_map)              → tabla terms (word, df)
+        ↓  {word: term_id}
+
+flush_postings(batch)             → tabla postings (term_id, doc_id, freq)
+        cada flush_every=5000 postings acumulados
+
         ↓
-  Counter(tokens)     ←── frecuencia cruda por documento
-        ↓
-  TFIndexer
-  ──────────
-  upsert_terms(df_map)        →  tabla terms  (word, df)
-  flush_postings(batch)       →  tabla postings (term_id, doc_id, freq)
-  mark_documents_indexed(ids) →  documents.indexed_tfidf_at = now
+
+mark_documents_indexed(doc_ids)   → indexed_tfidf_at = now()
+save_index_meta(stats)            → tabla index_meta
 ```
 
 ---
 
-## Preprocesador (`preprocessor.py`)
+## `TextPreprocessor`
 
-`TextPreprocessor` aplica estos pasos en orden:
+Transforma texto crudo en una lista de tokens limpios aplicando 9 pasos
+en orden estricto:
 
-1. Minúsculas
-2. Elimina URLs (`https://...`, `www...`)
-3. Elimina expresiones LaTeX (`$...$`, `\cmd{...}`)
-4. Elimina números aislados (`\b\d+\b`)
-5. Elimina puntuación
-6. Tokeniza por espacios
-7. Filtra tokens por longitud mínima (`min_token_len`, default 3)
-8. Filtra stopwords (NLTK inglés, o fallback básico)
-9. Conserva solo tokens alfabéticos (`isalpha()`)
-10. Stemming opcional (`SnowballStemmer`)
+| Paso | Operación | Ejemplo |
+|---|---|---|
+| 1 | Minúsculas | `"Attention"` → `"attention"` |
+| 2 | Elimina URLs | `"https://arxiv.org/..."` → `" "` |
+| 3 | Elimina LaTeX | `"$x^2$"`, `"\sum{...}"` → `" "` |
+| 4 | Elimina números aislados | `"\b42\b"` → `" "` |
+| 5 | Elimina puntuación | `","`, `"."`, `"–"`, `"\u201c"` → `""` |
+| 6 | Tokeniza por espacios | `text.split()` |
+| 7 | Filtra por longitud mínima | descarta tokens con `len < min_token_len` (default 3) |
+| 8 | Filtra stopwords | elimina `"the"`, `"is"`, `"with"`, etc. |
+| 9 | Conserva solo alfabéticos | `token.isalpha()` |
+| 10 | Stemming opcional | `"running"` → `"run"` (SnowballStemmer, requiere NLTK) |
 
 ```python
 from backend.indexing.preprocessor import TextPreprocessor
 
 pp = TextPreprocessor(use_stemming=False, min_token_len=3)
-tokens = pp.process("Attention mechanisms in transformer models.")
-# → ['attention', 'mechanisms', 'transformer', 'models']
+tokens = pp.process("Attention mechanisms in transformer models rely on self-attention.")
+# → ['attention', 'mechanisms', 'transformer', 'models', 'rely', 'self']
+```
+
+### Stemming
+
+```python
+pp_stem = TextPreprocessor(use_stemming=True)
+pp_stem.process("training neural networks requires computing gradients")
+# → ['train', 'neural', 'network', 'requir', 'comput', 'gradient']
+```
+
+`use_stemming=True` sin NLTK instalado se ignora silenciosamente.
+
+---
+
+## `TFIndexer`
+
+Motor de indexación. Responsabilidad única: leer documentos, tokenizar,
+contar y persistir.
+
+```python
+from backend.indexing.indexer import TFIndexer
+
+indexer = TFIndexer(
+    db_path    = Path("data/db/documents.db"),
+    field      = "full_text",  # "full_text" | "abstract" | "both"
+    batch_size = 100,          # documentos por lote de lectura
+    flush_every= 5_000,        # postings acumulados antes de volcar a BD
+)
+stats = indexer.build(reindex=False)
+```
+
+### Parámetro `field`
+
+| Valor | Comportamiento |
+|---|---|
+| `"full_text"` | Solo indexa `documents.full_text` (requiere `pdf_downloaded=1`) |
+| `"abstract"` | Solo indexa `documents.abstract` |
+| `"both"` | Usa `full_text` si está disponible, cae a `abstract` si no |
+
+### Modo incremental vs reindex
+
+**Incremental (`reindex=False`):** Solo procesa documentos con
+`indexed_tfidf_at IS NULL`. Los documentos ya indexados se omiten.
+Es el modo habitual en el orquestador.
+
+**Reindex (`reindex=True`):** Llama a `clear_index()` (borra toda la tabla
+`terms` y `postings` en cascade) y reindexea todo el corpus desde cero.
+Necesario al cambiar `field` o `min_token_len`.
+
+### Retorno de `build()`
+
+```python
+{
+    "docs_processed": 1234,    # documentos procesados en esta ejecución
+    "terms_added":    8901,    # términos nuevos añadidos al vocabulario
+    "postings_added": 145230,  # registros (term_id, doc_id, freq) escritos
+    "started_at":     "2024-01-01T10:00:00Z",
+    "finished_at":    "2024-01-01T10:02:15Z",
+}
 ```
 
 ---
 
-## Indexador (`indexer.py`)
+## `IndexingPipeline`
 
-`TFIndexer` ejecuta la indexación en tres pasos:
+Coordinador delgado que une `TextPreprocessor` + `TFIndexer` y expone
+un API limpia y una CLI completa.
 
-### Paso 1 — Tokenizar
+```python
+from backend.indexing.pipeline import IndexingPipeline
 
-Itera sobre `get_unindexed_documents()` — documentos con `pdf_downloaded=1` e `indexed_tfidf_at IS NULL`. Para cada uno, obtiene un `Counter` de tokens.
+pipeline = IndexingPipeline(
+    db_path      = Path("data/db/documents.db"),
+    field        = "both",     # "full_text" | "abstract" | "both"
+    batch_size   = 100,
+    use_stemming = False,
+    min_token_len= 3,
+)
+stats = pipeline.run(reindex=False)
+```
 
-### Paso 2 — Persistir vocabulario
+---
 
-Llama a `upsert_terms(df_map)` que inserta términos nuevos y acumula el `df` de los ya existentes en un solo batch.
+## CLI
 
-### Paso 3 — Persistir postings
+```bash
+# Indexación incremental (solo documentos nuevos)
+python -m backend.indexing.pipeline
 
-Vuelca lotes de `(term_id, doc_id, freq)` a la tabla `postings`. Al finalizar, llama a `mark_documents_indexed()` para que estos documentos no se reprocesen en ejecuciones futuras.
+# Reindexar desde cero
+python -m backend.indexing.pipeline --reindex
 
-### Indexación incremental
+# Solo abstract (útil si aún no hay PDFs descargados)
+python -m backend.indexing.pipeline --field abstract
 
-Por defecto `reindex=False` — solo se procesan documentos cuyo `indexed_tfidf_at` es `NULL`. Los documentos ya indexados se saltan siempre, incluso si el texto ha cambiado. Para forzar el reprocesado completo usa `--reindex`.
+# Con stemming
+python -m backend.indexing.pipeline --stemming
+
+# Todos los parámetros
+python -m backend.indexing.pipeline \
+  --db data/db/documents.db \
+  --field full_text \
+  --batch-size 200 \
+  --min-len 4 \
+  --stemming \
+  --reindex
+```
+
+### Opciones CLI
+
+| Flag | Default | Descripción |
+|---|---|---|
+| `--db` | `data/db/documents.db` | Ruta a la BD SQLite |
+| `--field` | `both` | Campo a indexar (`full_text` / `abstract` / `both`) |
+| `--batch-size N` | `100` | Documentos por lote de lectura |
+| `--reindex` | off | Limpiar y reconstruir desde cero |
+| `--stemming` | off | Activar SnowballStemmer (requiere NLTK) |
+| `--min-len N` | `3` | Longitud mínima de token |
 
 ---
 
 ## Qué se guarda y qué no
 
-| Tabla | Campo | Valor |
+| Tabla | Columna | Valor guardado |
 |---|---|---|
-| `terms` | `word` | token normalizado |
-| `terms` | `df` | nº de documentos que contienen el término |
-| `postings` | `freq` | nº de veces que aparece el término en el documento |
+| `terms` | `word` | Token normalizado (post-preprocesado) |
+| `terms` | `df` | Nº de documentos que contienen el término |
+| `postings` | `freq` | Nº de ocurrencias del término en el documento |
+| `documents` | `indexed_tfidf_at` | Timestamp de indexación (para incremental) |
 
-**No se guardan pesos TF-IDF.** El módulo `retrieval` lee estas frecuencias crudas y aplica la fórmula que necesite (log-TF × IDF, BM25, etc.) al construir la matriz para el SVD.
+**No se guardan pesos TF-IDF.** El módulo `retrieval` lee `freq` y `df`
+de la BD para construir la matriz TF-IDF al vuelo con:
+
+```
+TF(t,d)  = log(1 + freq(t,d))
+IDF(t)   = log((N+1) / (df(t)+1))
+W(t,d)   = TF(t,d) × IDF(t)
+```
+
+El filtro `min_df` (frecuencia mínima de documento) tampoco se aplica
+aquí: lo aplica `LSIModel.build()` al leer la matriz desde la BD.
 
 ---
 
 ## Tests
 
+Los tests están en `backend/tests/indexing/`.
+
 ```bash
-python -m backend.tests.test_indexing
-python -m pytest backend/tests/test_indexing.py -v
+pytest backend/tests/indexing/ -v
+
+pytest backend/tests/indexing/test_indexing_pipeline.py -v
+pytest backend/tests/indexing/test_index_repository.py  -v
 ```
+
+### Qué cubre cada archivo
+
+| Archivo | Qué verifica |
+|---|---|
+| `test_indexing_pipeline.py` | Pipeline completa: documentos procesados, docs sin PDF omitidos, modo incremental no reprocesa, `--reindex` reprocesa todo |
+| `test_index_repository.py` | `get_index_stats()`, `get_top_terms()`, `get_postings_for_term()`, `get_postings_for_matrix()` |
+
+Los tests usan una BD SQLite en `tmp_path` con 4 documentos: 3 con
+`pdf_downloaded=1` y texto, 1 con `pdf_downloaded=0` sin texto. El indexer
+solo debe procesar los 3 con PDF.

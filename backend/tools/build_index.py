@@ -1,7 +1,7 @@
 """
 build_index.py
 ==============
-Construye el índice invertido BM25 (terms + postings) desde los documentos
+Construye el índice invertido TF (terms + postings) desde los documentos
 existentes en la base de datos.
 
 Qué hace
@@ -50,7 +50,7 @@ RESET  = "\033[0m"
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _preview(db_path: Path, field: str) -> dict:
+def _preview(db_path: Path) -> dict:
     """Cuenta documentos disponibles y estado actual del índice."""
     conn = get_connection(db_path)
     try:
@@ -94,7 +94,7 @@ def _preview(db_path: Path, field: str) -> dict:
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="OmniRetrieve — Construye el índice BM25 (terms + postings)",
+        description="OmniRetrieve — Construye el índice invertido TF (terms + postings)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--db",
@@ -129,10 +129,10 @@ def main() -> None:
 
     # ── Preview ───────────────────────────────────────────────────────────────
     print(f"\n{BOLD}{'═' * 56}{RESET}")
-    print(f"{BOLD}  Build de índice BM25 — OmniRetrieve-Engine{RESET}")
+    print(f"{BOLD}  Build de índice TF — OmniRetrieve-Engine{RESET}")
     print(f"{BOLD}{'═' * 56}{RESET}")
 
-    prev = _preview(args.db, args.field)
+    prev = _preview(args.db)
 
     print(f"\n  {DIM}DB         : {args.db}{RESET}")
     print(f"  {DIM}Campo      : {args.field}{RESET}")
@@ -180,7 +180,7 @@ def main() -> None:
     elapsed = time.monotonic() - t0
 
     # ── Resultado ─────────────────────────────────────────────────────────────
-    post_prev = _preview(args.db, args.field)
+    post_prev = _preview(args.db)
 
     print(f"\n{BOLD}{'═' * 56}{RESET}")
     print(f"{BOLD}  Resultado{RESET}  ({elapsed:.1f}s)")

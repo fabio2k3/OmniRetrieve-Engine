@@ -29,7 +29,7 @@ Factory (construcción con configuración real del sistema):
 """
 
 from .protocols import RetrievalResult, RetrieverProtocol, RerankerProtocol
-from .lsi_model import LSIModel
+from .lsi_model import LSIModel, MODEL_PATH, MODEL_DIR
 from .lsi_retriever import LSIRetriever
 from .embedding_retriever import EmbeddingRetriever
 from .hybrid_retriever import HybridRetriever
@@ -42,6 +42,8 @@ from .factory import (
 )
 
 __all__ = [
+    #Paths
+    "MODEL_PATH", "MODEL_DIR",
     # Protocolos y tipos
     "RetrievalResult",
     "RetrieverProtocol",
