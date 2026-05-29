@@ -182,10 +182,18 @@ def do_web_search(
     query:             str,
     retriever_results: list,
     cfg:               OrchestratorConfig,
+    faiss_mgr:         Optional[FaissIndexManager] = None,
 ) -> dict:
     """
     Evalúa suficiencia de resultados locales y activa búsqueda web si procede.
     Acepta tanto ``list[dict]`` como ``list[RetrievalResult]``.
+
+    Parámetros
+    ----------
+    faiss_mgr : instancia activa de FaissIndexManager. Si se pasa, los docs
+                web recuperados se preprocesan, chunkean, embedean e insertan
+                en FAISS con IDs ``web:<domain>:<n>``. Si es None, la búsqueda
+                web funciona igualmente pero sin indexar en FAISS.
     """
     try:
         from backend.web_search.pipeline import WebSearchPipeline
@@ -205,6 +213,8 @@ def do_web_search(
             search_depth = cfg.web_search_depth,
             use_fallback = cfg.web_use_fallback,
             db_path      = cfg.db_path,
+            faiss_mgr    = faiss_mgr,
+            embed_model  = cfg.embed_model,
         )
     except Exception as exc:
         log.error("[web_search] Error al inicializar WebSearchPipeline: %s", exc)
@@ -459,6 +469,7 @@ def do_pipeline_ask(
     cross_encoder:   "CrossEncoderReranker",
     rag_pipeline:    "RAGPipeline",
     cfg:             OrchestratorConfig,
+    faiss_mgr:       Optional[FaissIndexManager] = None,
 ) -> dict:
     """
     Pipeline unificado de respuesta a consultas.
@@ -542,6 +553,10 @@ def do_pipeline_ask(
         }
 
     # ── 3. WebSearch (si procede) ─────────────────────────────────────────────
+    # Si se activa, los docs web son preprocesados, chunkeados, embeddeados
+    # e insertados en FAISS con IDs "web:<domain>:<n>" (sin tocar LSI ni BD).
+    # Los chunks web se devuelven como RetrievalResult y se pasan directamente
+    # al CrossEncoderReranker junto con los resultados locales.
     try:
         web_pipeline = WebSearchPipeline(
             threshold    = cfg.web_threshold,
@@ -551,17 +566,35 @@ def do_pipeline_ask(
             use_fallback  = cfg.web_use_fallback,
             seed_domains  = cfg.web_seed_domains or None,
             db_path       = cfg.db_path,
+            faiss_mgr    = faiss_mgr,           # indexar chunks web en FAISS
+            embed_model  = cfg.embed_model,     # mismo modelo que el pipeline local
         )
         # WebSearchPipeline espera list[dict] con clave 'score'
         hybrid_dicts = _retrieval_results_to_dicts(hybrid_results)
         web_out      = web_pipeline.run(query=query, retriever_results=hybrid_dicts)
         web_activated = web_out["web_activated"]
-        # Convertir resultados mixtos (dict web + dict local) a RetrievalResult
-        all_results  = _to_retrieval_results(web_out["results"])
-        log.info(
-            "[pipeline] WebSearch: activada=%s candidatos_totales=%d",
-            web_activated, len(all_results),
-        )
+
+        if web_activated:
+            # Si hay RetrievalResults de FAISS web, los usamos directamente
+            # (ya son RetrievalResult con .text correcto para el cross-encoder)
+            web_faiss = web_out.get("web_faiss_results", [])
+            if web_faiss:
+                all_results = hybrid_results + web_faiss
+                log.info(
+                    "[pipeline] WebSearch: activada=True "
+                    "local=%d + chunks_web_faiss=%d = total=%d",
+                    len(hybrid_results), len(web_faiss), len(all_results),
+                )
+            else:
+                # Fallback: convertir dicts web a RetrievalResult
+                all_results = _to_retrieval_results(web_out["results"])
+                log.info(
+                    "[pipeline] WebSearch: activada=True (sin FAISS) "
+                    "candidatos_totales=%d", len(all_results),
+                )
+        else:
+            all_results = hybrid_results
+            log.info("[pipeline] WebSearch: no activada — usando solo resultados locales.")
     except Exception as exc:
         log.warning("[pipeline] WebSearch falló, continuando sin web: %s", exc)
         web_activated = False

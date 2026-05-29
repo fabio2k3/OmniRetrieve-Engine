@@ -45,6 +45,7 @@ from backend.database.schema import DB_PATH
 from backend.web_search.searcher import WebSearcher
 from backend.web_search.sufficiency import SufficiencyChecker
 from backend.database.web_repository import save_web_results
+from backend.web_search.faiss_indexer import WebFaissIndexer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +81,8 @@ class WebSearchPipeline:
         seed_domains:  list[str] | None = None,
         fetch_content: bool            = True,
         db_path:       Path            = DB_PATH,
+        faiss_mgr=None,
+        embed_model:   str             = "all-MiniLM-L6-v2",
     ) -> None:
         self.searcher   = WebSearcher(
             api_key       = api_key,
@@ -94,6 +97,12 @@ class WebSearchPipeline:
             min_docs=min_docs,
         )
         self.db_path    = db_path
+        # Indexador FAISS para docs web (None = no indexar en FAISS)
+        self._web_faiss_indexer = (
+            WebFaissIndexer(faiss_mgr=faiss_mgr, model_name=embed_model)
+            if faiss_mgr is not None
+            else None
+        )
 
     def run(
         self,
@@ -133,11 +142,10 @@ class WebSearchPipeline:
         log.info("[WebSearch] Activando búsqueda web para: '%s'", query)
         web_results = self.searcher.search(query)
 
-        saved   = 0
-        indexed = 0
+        saved = 0
 
         if web_results:
-            # Guardar en BD
+            # Guardar en BD (histórico de búsquedas web)
             saved = save_web_results(
                 query=query,
                 results=web_results,
@@ -145,9 +153,36 @@ class WebSearchPipeline:
             )
             log.info("[WebSearch] %d documentos web guardados en BD.", saved)
 
+        # ── Preprocess → Chunk → Embed → FAISS ───────────────────────────────
+        # Los docs web se indexan en FAISS con IDs "web:<domain>:<n>"
+        # NO se tocan: tabla docs del crawler, índice LSI ni índice TF.
+        web_faiss_results = []
+        if not web_results:
+            log.debug("[WebSearch] Sin resultados web — saltando indexación FAISS.")
+        elif self._web_faiss_indexer is None:
+            log.warning(
+                "[WebSearch] _web_faiss_indexer es None — faiss_mgr no fue pasado "
+                "al constructor de WebSearchPipeline. Los docs web NO se indexarán en FAISS."
+            )
+        else:
+            try:
+                log.debug(
+                    "[WebSearch] Iniciando indexación FAISS de %d docs web…",
+                    len(web_results),
+                )
+                web_faiss_results = self._web_faiss_indexer.index(web_results)
+                log.info(
+                    "[WebSearch] %d chunks web indexados en FAISS.",
+                    len(web_faiss_results),
+                )
+            except Exception as exc:
+                log.error(
+                    "[WebSearch] Falló la indexación FAISS de docs web: %s",
+                    exc, exc_info=True,
+                )
 
-
-        # Normalizar al formato del retriever
+        # Normalizar al formato dict del retriever (para compatibilidad con
+        # pipelines que consumen dicts; el cross-encoder usará web_faiss_results)
         web_normalized = [
             {
                 "score":    r["score"],
@@ -167,20 +202,26 @@ class WebSearchPipeline:
                 r.setdefault("source", "local")
 
         # Combinar: primero locales, luego web
-        combined = retriever_results + web_normalized
+        # Si tenemos RetrievalResults de FAISS los incluimos directamente;
+        # si no, usamos los dicts normalizados como fallback.
+        if web_faiss_results:
+            combined = retriever_results + web_faiss_results
+        else:
+            combined = retriever_results + web_normalized
 
         log.info(
-            "[WebSearch] Combinados: %d locales + %d web = %d total. "
-            "Docs indexados: %d.",
-            len(retriever_results), len(web_normalized), len(combined), indexed,
+            "[WebSearch] Combinados: %d locales + %d web (%d chunks FAISS) = %d total.",
+            len(retriever_results), len(web_normalized),
+            len(web_faiss_results), len(combined),
         )
 
         return {
-            "results":       combined,
-            "web_activated": True,
-            "web_results":   web_normalized,
-            "reason":        reason,
-            "query":         query,
+            "results":            combined,
+            "web_activated":      True,
+            "web_results":        web_normalized,
+            "web_faiss_results":  web_faiss_results,  # RetrievalResult listos para cross-encoder
+            "reason":             reason,
+            "query":              query,
         }
 
 
