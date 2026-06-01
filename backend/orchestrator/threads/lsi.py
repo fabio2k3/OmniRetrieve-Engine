@@ -105,7 +105,7 @@ def _fast_load(
             "[lsi] Modelo cargado rapidamente — %d docs | %d terminos. "
             "Rebuild en segundo plano...",
             len(retriever._model.doc_ids),
-            len(retriever._word_index),
+            len(retriever._vectorizer._word_index) if retriever._vectorizer else 0,
         )
     except Exception as exc:
         log.warning(
