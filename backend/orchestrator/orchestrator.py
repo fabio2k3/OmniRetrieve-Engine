@@ -200,6 +200,7 @@ class Orchestrator:
             cross_encoder    = cross_enc,
             rag_pipeline     = rag,
             cfg              = self.cfg,
+            faiss_mgr        = self._faiss_mgr,   # para indexar docs web
         )
 
     # ── API pública — modos standalone ───────────────────────────────────────
@@ -219,7 +220,7 @@ class Orchestrator:
         """Búsqueda LSI + fallback web si los resultados locales son insuficientes."""
         top_n = top_n if top_n is not None else self.cfg.retrieval_top_k
         local_results = self.query(text, top_n=top_n)
-        return do_web_search(text, local_results, self.cfg)
+        return do_web_search(text, local_results, self.cfg, faiss_mgr=self._faiss_mgr)
 
     def semantic_query(self, text: str, top_k: int | None = None) -> list[dict]:
         """Búsqueda semántica densa directa sobre FAISS (sin reranking)."""

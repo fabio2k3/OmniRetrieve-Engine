@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from .sites import DEFAULT_SEED_DOMAINS, get_site_filter
+from backend.crawler.robots import checker as _robots_checker
 
 log = logging.getLogger(__name__)
 
@@ -69,17 +71,7 @@ def _strip_html(html_bytes: bytes) -> str:
     return text
 
 
-def _fetch_page(url: str, max_chars: int = _MAX_PAGE_CHARS) -> str:
-    """Fetchea la URL y extrae texto limpio. Devuelve '' si falla."""
-    try:
-        from backend.crawler.http import fetch_bytes
-        raw = fetch_bytes(url, timeout=10, accept="text/html")
-        if not raw:
-            return ""
-        return _strip_html(raw)[:max_chars]
-    except Exception as exc:
-        log.debug("[SiteSearcher] No se pudo fetchear %s: %s", url, exc)
-        return ""
+
 
 
 def _ddgs_text(query: str, region: str, max_results: int) -> list[dict]:
@@ -136,12 +128,75 @@ class SiteSearcher:
             len(self.seed_domains), _DDGS_VERSION,
         )
 
+    # ── Robots / fetch ───────────────────────────────────────────────────────
+
+    @property
+    def _trusted_domains(self) -> frozenset[str]:
+        """
+        Frozenset de los dominios semilla activos.
+
+        Se usan como ``trusted_domains`` en ``RobotsChecker.allowed()`` para
+        saltarse el fetch de robots.txt de cada sitio. Motivo: la mayoría de
+        los dominios académicos de la lista responden con 403/404 a robots.txt,
+        lo que añade latencia y ruido sin aportar información útil. Los dominios
+        semilla son una lista curada manualmente, por lo que la decisión de
+        incluirlos ya implica que se considera apropiado acceder a ellos.
+        """
+        return frozenset(self.seed_domains)
+
+    def _fetch_page(self, url: str, max_chars: int = _MAX_PAGE_CHARS) -> str:
+        """
+        Fetchea la URL y extrae texto limpio. Devuelve '' si falla.
+
+        Política de robots.txt
+        ----------------------
+        - Si la URL pertenece a uno de los ``seed_domains`` configurados, se
+          considera dominio de confianza y se omite el fetch de robots.txt
+          (evita los errores 403/404 que dan casi todos los sitios académicos).
+        - Para URLs fuera de los dominios semilla (caso excepcional) se consulta
+          robots.txt normalmente.
+        - El ``Crawl-delay`` declarado en robots.txt se respeta siempre,
+          independientemente de si el dominio es de confianza o no.
+        """
+        # ── 1. Comprobar robots.txt (con bypass para dominios semilla) ────────
+        if not _robots_checker.allowed(url, trusted_domains=self._trusted_domains):
+            log.info("[SiteSearcher] robots.txt prohíbe fetchear: %s", url)
+            return ""
+
+        # ── 2. Respetar Crawl-delay (siempre, sin bypass) ────────────────────
+        delay = _robots_checker.crawl_delay(url)
+        if delay > 0:
+            log.debug("[SiteSearcher] Crawl-delay %.1fs para %s", delay, url)
+            time.sleep(delay)
+
+        # ── 3. Fetch + extracción de texto ───────────────────────────────────
+        try:
+            from backend.crawler.http import fetch_bytes
+            raw = fetch_bytes(url, timeout=10, accept="text/html")
+            if not raw:
+                return ""
+            return _strip_html(raw)[:max_chars]
+        except Exception as exc:
+            log.debug("[SiteSearcher] No se pudo fetchear %s: %s", url, exc)
+            return ""
+
+    # Máximo de dominios por lote de búsqueda.
+    # Con más de 4-5 dominios en un solo site: OR la URL supera los límites
+    # de DuckDuckGo y el resto de motores, generando timeouts.
+    _DOMAINS_PER_BATCH = 4
+
     def search(self, query: str, max_results: int | None = None) -> list[dict[str, Any]]:
         """
         Busca en los dominios semilla y devuelve resultados normalizados.
 
-        La query se restringe a los dominios semilla usando el operador
-        site: de DuckDuckGo: "{query} (site:dom1 OR site:dom2 …)"
+        Los dominios se dividen en lotes de ``_DOMAINS_PER_BATCH`` para evitar
+        que la URL supere el límite de los motores de búsqueda. Cada lote genera
+        una query del tipo::
+
+            "{query} (site:dom1 OR site:dom2 OR site:dom3 OR site:dom4)"
+
+        Los resultados de todos los lotes se combinan, se deduplicen por URL
+        y se recortan a ``max_results``.
 
         Parámetros
         ----------
@@ -162,21 +217,45 @@ class SiteSearcher:
 
         n = max_results or self.max_results
 
-        # Construir query restringida a los dominios semilla
-        site_filter    = get_site_filter(self.seed_domains)
-        restricted_q   = f"{query} ({site_filter})" if site_filter else query
-
         log.info(
-            "[SiteSearcher] Buscando en %d dominios: '%s'",
-            len(self.seed_domains), query,
+            "[SiteSearcher] Buscando en %d dominios (lotes de %d): '%s'",
+            len(self.seed_domains), self._DOMAINS_PER_BATCH, query,
         )
-        log.debug("[SiteSearcher] Query restringida: %s", restricted_q[:120])
 
-        raw = _ddgs_text(restricted_q, region=self.region, max_results=n)
-        log.info("[SiteSearcher] %d URLs obtenidas.", len(raw))
+        # Dividir dominios en lotes para no exceder el límite de URL
+        batches = [
+            self.seed_domains[i: i + self._DOMAINS_PER_BATCH]
+            for i in range(0, len(self.seed_domains), self._DOMAINS_PER_BATCH)
+        ]
+
+        seen_urls: set[str] = set()
+        raw_items: list[dict] = []
+
+        for batch_idx, batch in enumerate(batches):
+            if len(raw_items) >= n * 2:
+                # Ya tenemos candidatos suficientes; evitar llamadas innecesarias
+                break
+
+            site_filter  = get_site_filter(batch)
+            restricted_q = f"{query} ({site_filter})" if site_filter else query
+
+            log.debug(
+                "[SiteSearcher] Lote %d/%d — query: %s",
+                batch_idx + 1, len(batches), restricted_q[:120],
+            )
+
+            raw = _ddgs_text(restricted_q, region=self.region, max_results=n)
+
+            for r in raw:
+                url = r.get("href") or r.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    raw_items.append(r)
+
+        log.info("[SiteSearcher] %d URLs únicas obtenidas en %d lotes.", len(raw_items), len(batches))
 
         results = []
-        for r in raw:
+        for r in raw_items[:n * 2]:   # procesar como máximo el doble del límite
             title   = r.get("title", "Sin título")
             url     = r.get("href") or r.get("url", "")
             snippet = r.get("body") or r.get("snippet", "")
@@ -184,7 +263,7 @@ class SiteSearcher:
             content = ""
             if self.fetch_content and url:
                 log.debug("[SiteSearcher] Fetcheando: %s", url)
-                content = _fetch_page(url)
+                content = self._fetch_page(url)
 
             # Fallback al snippet si el fetch fue vacío o muy corto
             if len(content) < 200:
@@ -201,6 +280,9 @@ class SiteSearcher:
                 "score":   0.5,
                 "source":  "web_search",
             })
+
+            if len(results) >= n:
+                break
 
         log.info(
             "[SiteSearcher] %d resultados con contenido (fetch_content=%s).",
